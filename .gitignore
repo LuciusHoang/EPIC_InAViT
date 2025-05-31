@@ -1,0 +1,18 @@
+# Ignore specific files
+EgoDex- Learning Dexterous Manipulation from Large-Scale Egocentric Video.pdf
+example_0.hdf5
+example_0.mp4
+explore_data.py
+part1_extra_a.zip
+test_extra.zip
+
+# Ignore everything in the /test/ folder
+/test/
+
+# Ignore macOS system files
+.DS_Store
+
+# Ignore IDE project files
+.idea/
+
+
