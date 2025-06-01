@@ -1,8 +1,9 @@
-﻿torch>=2.0
+torch>=2.0
 torchvision
 numpy
 opencv-python
 h5py
 scikit-learn
 matplotlib
-seaborn
+tqdm
+pandas

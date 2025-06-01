@@ -1,138 +1,94 @@
 import os
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-
-from config import *
 from utils.data_loader import get_dataloader
-from utils.metrics import compute_metrics
-from utils.logger import Logger
-from utils.utils import set_seed, get_device, ensure_dir
-
 from models.mlp_bc import MLPBC
 from models.cnn_lstm import CNNLSTM
 from models.transformer import PoseTransformer
+from config import Config
+from utils.logger import Logger
 
-def select_model(model_name):
-    """
-    Factory function to select model architecture.
-    """
-    if model_name == 'mlp_bc':
-        return MLPBC(input_size=48, seq_length=SEQ_LENGTH, num_classes=NUM_CLASSES)
-    elif model_name == 'cnn_lstm':
-        return CNNLSTM(num_classes=NUM_CLASSES)
-    elif model_name == 'transformer':
-        return PoseTransformer(input_size=48, seq_length=SEQ_LENGTH, num_classes=NUM_CLASSES)
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
+def train():
+    config = Config()
+    logger = Logger(config.log_dir)
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    all_labels = []
-    all_preds = []
+    train_loader = get_dataloader(
+        root_dir=config.train_data_path,
+        task_list=config.task_list,
+        batch_size=config.batch_size,
+        shuffle=True,
+        seq_length=config.seq_length,
+        num_workers=config.num_workers
+    )
 
-    for batch in dataloader:
-        optimizer.zero_grad()
-        inputs = batch['pose'].to(device) if 'pose' in batch else None
-        video_inputs = batch['video'].to(device) if 'video' in batch else None
-        labels = batch['label'].to(device)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        if isinstance(model, MLPBC) or isinstance(model, PoseTransformer):
-            outputs = model(inputs)
-        elif isinstance(model, CNNLSTM):
-            outputs = model(video_inputs)
+    for model_type in config.model_types:
+        logger.log(f"\n🚀 Starting training for model: {model_type}")
+
+        if model_type == 'mlp':
+            model = MLPBC(
+                input_dim=config.input_dim,
+                seq_length=config.seq_length,
+                num_classes=config.num_classes
+            )
+            checkpoint_name = 'mlp_bc_checkpoint.pth'
+        elif model_type == 'cnn_lstm':
+            model = CNNLSTM(
+                input_dim=config.input_dim,
+                num_classes=config.num_classes
+            )
+            checkpoint_name = 'cnn_lstm_checkpoint.pth'
+        elif model_type == 'transformer':
+            model = PoseTransformer(
+                input_size=config.input_dim,
+                seq_length=config.seq_length,
+                num_classes=config.num_classes
+            )
+            checkpoint_name = 'transformer_checkpoint.pth'
         else:
-            raise ValueError("Model type not supported in train_one_epoch.")
+            logger.log(f"⚠️ Unsupported model type: {model_type}. Skipping.")
+            continue
 
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
+        model.to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+        criterion = torch.nn.CrossEntropyLoss()
 
-        running_loss += loss.item() * inputs.size(0)
-        _, preds = torch.max(outputs, 1)
-        all_labels.extend(labels.cpu().numpy())
-        all_preds.extend(preds.cpu().numpy())
+        model.train()
+        for epoch in range(config.epochs):
+            running_loss = 0.0
 
-    epoch_loss = running_loss / len(dataloader.dataset)
-    metrics = compute_metrics(all_labels, all_preds)
-    return epoch_loss, metrics
+            for batch_idx, (data, labels) in enumerate(train_loader):
+                data, labels = data.to(device), labels.to(device)
 
-def validate(model, dataloader, criterion, device):
-    model.eval()
-    running_loss = 0.0
-    all_labels = []
-    all_preds = []
+                valid_mask = labels != -1
+                if valid_mask.sum() == 0:
+                    continue
 
-    with torch.no_grad():
-        for batch in dataloader:
-            inputs = batch['pose'].to(device) if 'pose' in batch else None
-            video_inputs = batch['video'].to(device) if 'video' in batch else None
-            labels = batch['label'].to(device)
+                data = data[valid_mask]
+                labels = labels[valid_mask]
 
-            if isinstance(model, MLPBC) or isinstance(model, PoseTransformer):
-                outputs = model(inputs)
-            elif isinstance(model, CNNLSTM):
-                outputs = model(video_inputs)
-            else:
-                raise ValueError("Model type not supported in validate.")
+                optimizer.zero_grad()
+                outputs = model(data)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
 
-            loss = criterion(outputs, labels)
-            running_loss += loss.item() * inputs.size(0)
+                running_loss += loss.item()
 
-            _, preds = torch.max(outputs, 1)
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
+                if batch_idx % 10 == 0:
+                    logger.log(f"[{model_type}] Epoch [{epoch+1}/{config.epochs}], "
+                               f"Step [{batch_idx+1}/{len(train_loader)}], "
+                               f"Loss: {loss.item():.4f}")
 
-    epoch_loss = running_loss / len(dataloader.dataset)
-    metrics = compute_metrics(all_labels, all_preds)
-    return epoch_loss, metrics
+            avg_loss = running_loss / len(train_loader)
+            logger.log(f"[{model_type}] Epoch [{epoch+1}/{config.epochs}] completed. "
+                       f"Average Loss: {avg_loss:.4f}")
 
-def main(model_name='mlp_bc'):
-    set_seed(SEED)
-    device = get_device()
+        checkpoint_path = os.path.join(config.checkpoint_dir, checkpoint_name)
+        logger.save_checkpoint(model, optimizer, config.epochs, {'loss': avg_loss}, checkpoint_path)
+        logger.log(f"✅ Training completed for model: {model_type}")
 
-    ensure_dir(LOG_DIR)
-    ensure_dir(CHECKPOINT_DIR)
-    logger = Logger(LOG_DIR)
-    logger.log(f"Starting training with model: {model_name}")
+    logger.log('🎉 All models have been trained!')
 
-    # Initialize model
-    model = select_model(model_name).to(device)
-    logger.log(str(model))
-
-    # Data loaders
-    train_loader = get_dataloader(TRAIN_DATA_DIR, SELECTED_TASKS, batch_size=BATCH_SIZE, mode='train', shuffle=True, num_workers=NUM_WORKERS)
-    val_loader = get_dataloader(TEST_DATA_DIR, SELECTED_TASKS, batch_size=BATCH_SIZE, mode='test', shuffle=False, num_workers=NUM_WORKERS)
-
-    # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-    best_val_acc = 0.0
-
-    for epoch in range(EPOCHS):
-        logger.log(f"Epoch {epoch+1}/{EPOCHS}")
-
-        train_loss, train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_metrics = validate(model, val_loader, criterion, device)
-
-        logger.log(f"Train Loss: {train_loss:.4f}, Train Acc: {train_metrics['accuracy']:.4f}, Train F1: {train_metrics['f1_macro']:.4f}")
-        logger.log(f"Val Loss: {val_loss:.4f}, Val Acc: {val_metrics['accuracy']:.4f}, Val F1: {val_metrics['f1_macro']:.4f}")
-
-        # Save best model
-        if val_metrics['accuracy'] > best_val_acc:
-            best_val_acc = val_metrics['accuracy']
-            logger.save_checkpoint(model, optimizer, epoch, val_metrics, checkpoint_name='best_model.pth')
-
-    logger.log("Training completed.")
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Train EgoDex classification models.")
-    parser.add_argument('--model', type=str, default='mlp_bc', choices=['mlp_bc', 'cnn_lstm', 'transformer'],
-                        help='Model architecture to train.')
-    args = parser.parse_args()
-
-    main(model_name=args.model)
+if __name__ == '__main__':
+    train()

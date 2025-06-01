@@ -8,11 +8,18 @@ test_extra.zip
 
 # Ignore everything in the /test/ folder
 /test/
+/test1/
+/logs/
 
 # Ignore macOS system files
 .DS_Store
 
 # Ignore IDE project files
 .idea/
+
+# PY cache
+__pycache__/
+*.pyc
+
 
 
