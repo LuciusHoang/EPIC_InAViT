@@ -1,107 +1,79 @@
+# evaluate.py
+
 import os
+import numpy as np
 import torch
+import logging
 from tqdm import tqdm
-from utils.data_loader import get_dataloader
-from utils.metrics import compute_metrics, plot_confusion_matrix
-from config import (
-    TEST_DATA_DIR,
-    SELECTED_TASKS,
-    NUM_CLASSES,
-    BATCH_SIZE,
-    SEQ_LENGTH,
-    NUM_WORKERS,
-    USE_MPS,
-    CHECKPOINT_DIR,
-    INPUT_DIM,
-    MODEL_TYPES
-)
-from models import mlp_bc, cnn_lstm, transformer
+from sklearn.metrics import accuracy_score, classification_report
+from torch.nn import functional as F
 
-def evaluate():
-    device = torch.device("mps" if USE_MPS and torch.backends.mps.is_available() else "cpu")
+from utils.data_loader import EgoDataset
+from models.egom2p_encoder import EgoM2PEncoder
+from models.egopack_gnn import EgoPackGNN
 
-    test_loader = get_dataloader(
-        root_dir=TEST_DATA_DIR,
-        task_list=SELECTED_TASKS,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        seq_length=SEQ_LENGTH,
-        num_workers=NUM_WORKERS
+def evaluate(embedding_type='egom2p'):
+    DEVICE = torch.device('cpu')
+    LABELS_PATH = 'test_labels.npy'
+    CLIP_IDS_PATH = 'clip_ids.npy'
+    LOGIT_SAVE_PATH = f'logits/{embedding_type}_logits.npy'
+    LOG_PATH = f'logs/{embedding_type}/evaluate.log'
+
+    os.makedirs('logits', exist_ok=True)
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_PATH,
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s'
     )
 
-    for model_name in MODEL_TYPES:
-        print(f"\n🚀 Evaluating model: {model_name}")
+    dataset = EgoDataset(mode='precompute')
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
-        # Model selection
-        if model_name == 'mlp':
-            model = mlp_bc.MLPBC(
-                input_dim=INPUT_DIM,
-                seq_length=SEQ_LENGTH,
-                num_classes=NUM_CLASSES
-            )
-            checkpoint_name = 'mlp_bc_checkpoint.pth'
-        elif model_name == 'cnn_lstm':
-            model = cnn_lstm.CNNLSTM(
-                input_dim=INPUT_DIM,
-                num_classes=NUM_CLASSES
-            )
-            checkpoint_name = 'cnn_lstm_checkpoint.pth'
-        elif model_name == 'transformer':
-            model = transformer.PoseTransformer(
-                input_size=INPUT_DIM,
-                seq_length=SEQ_LENGTH,
-                num_classes=NUM_CLASSES
-            )
-            checkpoint_name = 'transformer_checkpoint.pth'
-        else:
-            print(f"⚠️ Unsupported model type: {model_name}. Skipping.")
-            continue
+    if embedding_type == 'egom2p':
+        model = EgoM2PEncoder(add_classifier=True).to(DEVICE).eval()
+    elif embedding_type == 'egopack':
+        model = EgoPackGNN(add_classifier=True).to(DEVICE).eval()
+    else:
+        raise ValueError("Unsupported model type")
 
-        model.to(device)
+    probs_all = []
+    clip_ids = []
 
-        # Load checkpoint
-        checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_name)
-        if not os.path.exists(checkpoint_path):
-            print(f"❌ Checkpoint not found at {checkpoint_path}. Skipping {model_name}.")
-            continue
+    with torch.no_grad():
+        for batch in tqdm(dataloader):
+            if embedding_type == 'egom2p':
+                rgb = batch['rgb'].to(DEVICE)
+                pose = batch['pose'].to(DEVICE)
+                logits = model(rgb, pose)
+            else:
+                graph = batch['graph'].to(DEVICE)
+                logits = model(graph)
 
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+            probs = F.softmax(logits, dim=1)
+            probs_all.append(probs.cpu().numpy())
+            clip_ids.append(batch['clip_ids'])
 
-        model.eval()
-        all_preds = []
-        all_labels = []
+    probs_all = np.concatenate(probs_all, axis=0)
+    clip_ids = np.array(clip_ids).squeeze()
+    np.save(LOGIT_SAVE_PATH, probs_all)
+    np.save("clip_ids.npy", clip_ids)
+    logging.info(f"Saved probabilities to {LOGIT_SAVE_PATH}")
+    logging.info(f"Saved clip IDs to clip_ids.npy")
 
-        with torch.no_grad():
-            for inputs, labels in tqdm(test_loader, desc=f"Evaluating {model_name}"):
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+    true_labels = np.load(LABELS_PATH)
+    preds = np.argmax(probs_all, axis=1)
 
-                # Filter invalid labels
-                valid_mask = labels != -1
-                if valid_mask.sum() == 0:
-                    continue
+    acc = accuracy_score(true_labels, preds)
+    report = classification_report(true_labels, preds)
 
-                inputs = inputs[valid_mask]
-                labels = labels[valid_mask]
+    print(f"Accuracy: {acc:.4f}")
+    print(report)
+    logging.info(f"Accuracy: {acc:.4f}")
+    logging.info(f"Classification Report:\n{report}")
 
-                outputs = model(inputs)
-                preds = torch.argmax(outputs, dim=1)
-                all_preds.append(preds.cpu())
-                all_labels.append(labels.cpu())
-
-        if not all_preds or not all_labels:
-            print(f"⚠️ No valid samples found for {model_name}. Skipping metrics.")
-            continue
-
-        all_preds = torch.cat(all_preds)
-        all_labels = torch.cat(all_labels)
-
-        metrics = compute_metrics(all_labels, all_preds, class_names=SELECTED_TASKS)
-        print(f"✅ {model_name.upper()} Test Accuracy: {metrics['accuracy']:.4f}")
-        print(f"✅ {model_name.upper()} Test Macro F1: {metrics['f1_macro']:.4f}")
-
-        plot_confusion_matrix(metrics['confusion_matrix'], SELECTED_TASKS, normalize=True)
+    for cid, pred in zip(clip_ids, preds):
+        logging.info(f"{cid}: predicted class {pred}")
 
 if __name__ == "__main__":
-    evaluate()
+    evaluate('egom2p')
