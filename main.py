@@ -1,39 +1,42 @@
 # main.py
 
-import argparse
-import sys
-from generate_test_labels import generate_test_labels_and_ids
-from precompute_features import run_feature_extraction
-from evaluate import evaluate
-from ensemble import run_ensemble
+import os
+import json
+from inavit_inference import infer
 
-def run():
-    parser = argparse.ArgumentParser(description="EgoDex Full Pipeline")
-    parser.add_argument('--run_all', action='store_true', help='Run the full pipeline: labels → features → evaluate → ensemble')
-    parser.add_argument('--evaluate_only', choices=['egom2p', 'egopack'], help='Evaluate only one model')
-    args = parser.parse_args()
+# Path settings
+TEST_DIR = "test"
+CHECKPOINT_PATH = "checkpoints/checkpoint_epoch_00081.pyth"
+OUTPUT_JSON = "results/inavit_predictions.json"
 
-    if args.run_all:
-        print("\U0001f527 Step 1: Generate labels...")
-        generate_test_labels_and_ids()
+def main():
+    predictions = {}
 
-        for model in ['egom2p', 'egopack']:
-            print(f"\U0001f680 Step 2: Precompute features for {model}...")
-            run_feature_extraction(embedding_type=model)
+    for action_folder in sorted(os.listdir(TEST_DIR)):
+        action_path = os.path.join(TEST_DIR, action_folder)
+        if not os.path.isdir(action_path):
+            continue
 
-            print(f"\U0001f9ea Step 3: Evaluate {model}...")
-            evaluate(embedding_type=model)
+        for file_name in sorted(os.listdir(action_path)):
+            if not file_name.endswith(".mp4"):
+                continue
 
-        print("⚖️ Step 4: Running ensemble...")
-        run_ensemble()
+            video_path = os.path.join(action_path, file_name)
+            print(f"🔍 Running inference on: {video_path}")
 
-    elif args.evaluate_only:
-        print(f"\U0001f9ea Evaluating {args.evaluate_only} only...")
-        evaluate(embedding_type=args.evaluate_only)
+            pred_class, mapped_label = infer(video_path, CHECKPOINT_PATH)
 
-    else:
-        print("❌ No mode specified. Use --run_all or --evaluate_only.")
-        sys.exit(1)
+            predictions[video_path] = {
+                "class_index": pred_class,
+                "mapped_label": mapped_label or "unknown",
+                "true_label": action_folder
+            }
+
+    os.makedirs(os.path.dirname(OUTPUT_JSON), exist_ok=True)
+    with open(OUTPUT_JSON, "w") as f:
+        json.dump(predictions, f, indent=2)
+
+    print(f"\n✅ Saved predictions to: {OUTPUT_JSON}")
 
 if __name__ == "__main__":
-    run()
+    main()
