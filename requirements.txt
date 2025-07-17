@@ -1,9 +1,40 @@
-torch>=2.0
-torchvision
-numpy
-opencv-python
+# Core ML frameworks
+torch>=1.10
+torchvision>=0.11
+
+# Video and image processing
+opencv-python==4.10.0.84
+numpy==1.26.4
+Pillow
+argparse
+detectron2
+
+# InAViT / SlowFast dependencies
+fvcore
+simplejson
+einops
+timm
+psutil
+tensorboard
+pandas
+ffmpeg-python
+# decord # conda install -c conda-forge decord
+# av # conda install -c conda-forge av
+filterpy
 h5py
+imgaug
+iopath
+fvcore
+einops
+scipy
+
+# Utility and progress tools
+tqdm
+
+# Evaluation and visualization
 scikit-learn
 matplotlib
-tqdm
-pandas
+seaborn
+
+# Optional: YAML parsing
+PyYAML

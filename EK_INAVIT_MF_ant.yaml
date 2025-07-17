@@ -18,7 +18,7 @@ TRAIN:
   AUTO_RESUME: True
   MIXED_PRECISION: True
   CHECKPOINT_EPOCH_RESET: True
-  CHECKPOINT_FILE_PATH: checkpoints/checkpoint_epoch_00081.pyth
+  CHECKPOINT_FILE_PATH: /checkpoints/checkpoint_epoch_00081.pyth
 DATA:
   NUM_FRAMES: 16
   SAMPLING_RATE: 4
@@ -87,7 +87,7 @@ TEST:
 DATA_LOADER:
   NUM_WORKERS: 8
   PIN_MEMORY: True
-NUM_GPUS: 4
+NUM_GPUS: 0
 NUM_SHARDS: 1
 RNG_SEED: 0
 OUTPUT_DIR: checkpoints/hoivit_ek_wmotion_ant

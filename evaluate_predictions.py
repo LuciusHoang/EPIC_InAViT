@@ -15,16 +15,16 @@ def evaluate():
     y_true = []
     y_pred = []
 
-    for video_name, result in data.items():
-        if result["egodex_class"] != "unknown":
-            # Infer true label from folder name if filename includes it
-            # e.g., test/pour/0.mp4 → class = "pour"
-            true_label = video_name.split("_")[0] if "_" in video_name else "unknown"
+    for result in data:
+        if result["pred_label"].lower() != "unknown":
+            video_path = result["file"]
+            # Infer true label from folder name, e.g., test/pour/0.mp4 → "pour"
+            true_label = os.path.basename(os.path.dirname(video_path))
             y_true.append(true_label)
-            y_pred.append(result["egodex_class"])
+            y_pred.append(result["pred_label"])
 
     print("📊 Classification Report (per-class metrics):")
-    print(classification_report(y_true, y_pred, digits=3))
+    print(classification_report(y_true, y_pred, digits=3, zero_division=0))
 
     acc = accuracy_score(y_true, y_pred)
     print(f"✅ Top-1 Accuracy: {acc:.3f}")
@@ -45,4 +45,4 @@ def plot_confusion_matrix(y_true, y_pred):
 
 if __name__ == "__main__":
     y_true, y_pred = evaluate()
-    # plot_confusion_matrix(y_true, y_pred)
+    # plot_confusion_matrix(y_true, y_pred)  # Uncomment to visualize

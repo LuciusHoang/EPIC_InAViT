@@ -6,9 +6,11 @@ explore_data.py
 
 # Ignore everything in folders
 /test/
+/test_hdf5/
 /test_extra/
 /checkpoints/
 /results/
+/decord/
 
 # Clone from https://github.com/LAHAproject/InAViT.git
 /InAViT/
