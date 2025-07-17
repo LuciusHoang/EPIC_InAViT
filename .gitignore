@@ -11,7 +11,8 @@ explore_data.py
 /results/
 
 # Clone from https://github.com/LAHAproject/InAViT.git
-/InAViT/
+/InAViT/*
+!InAViT/.gitkeep
 
 # Ignore macOS system files
 .DS_Store
