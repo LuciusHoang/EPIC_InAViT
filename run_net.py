@@ -6,18 +6,18 @@ import sys
 sys.path = [x for x  in sys.path if not (os.path.isdir(x) and 'slowfast' in os.listdir(x))]
 sys.path.append(os.getcwd())
 
-import slowfast
-assert slowfast.__file__.startswith(os.getcwd()), f"sys.path: {sys.path}, slowfast.__file__: {slowfast.__file__}"
+import InAViT.slowfast
+assert InAViT.slowfast.__file__.startswith(os.getcwd()), f"sys.path: {sys.path}, slowfast.__file__: {slowfast.__file__}"
 
 """Wrapper to train and test a video classification model."""
-from slowfast.config.defaults import assert_and_infer_cfg
-from slowfast.utils.misc import launch_job
-from slowfast.utils.parser import load_config, parse_args
+from InAViT.slowfast.config.defaults import assert_and_infer_cfg
+from InAViT.slowfast.utils.misc import launch_job
+from InAViT.slowfast.utils.parser import load_config, parse_args
 
-from demo_net import demo
-from test_net import test
-from train_net import train
-from visualization import visualize
+from InAViT.tools.demo_net import demo
+from InAViT.tools.test_net import test
+from InAViT.tools.train_net import train
+from InAViT.tools.visualization import visualize
 
 
 def main():

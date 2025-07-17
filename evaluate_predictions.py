@@ -15,10 +15,13 @@ def evaluate():
     y_true = []
     y_pred = []
 
-    for video_path, result in data.items():
-        if result["mapped_label"] != "unknown":
-            y_true.append(result["true_label"])
-            y_pred.append(result["mapped_label"])
+    for video_name, result in data.items():
+        if result["egodex_class"] != "unknown":
+            # Infer true label from folder name if filename includes it
+            # e.g., test/pour/0.mp4 → class = "pour"
+            true_label = video_name.split("_")[0] if "_" in video_name else "unknown"
+            y_true.append(true_label)
+            y_pred.append(result["egodex_class"])
 
     print("📊 Classification Report (per-class metrics):")
     print(classification_report(y_true, y_pred, digits=3))

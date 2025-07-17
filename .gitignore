@@ -10,6 +10,9 @@ explore_data.py
 /checkpoints/
 /results/
 
+# Clone from https://github.com/LAHAproject/InAViT.git
+/InAViT/
+
 # Ignore macOS system files
 .DS_Store
 
