@@ -1,19 +1,15 @@
 # Ignore specific files
-EgoDex- Learning Dexterous Manipulation from Large-Scale Egocentric Video.pdf
-example_0.hdf5
-example_0.mp4
 explore_data.py
 
 # Ignore everything in folders
-/test/
-/test_hdf5/
-/test_extra/
 /checkpoints/
 /results/
 /decord/
+/EK_data/
 
 # Clone from https://github.com/LAHAproject/InAViT.git
 /InAViT/
+/InAViT_amended/
 
 # Ignore macOS system files
 .DS_Store

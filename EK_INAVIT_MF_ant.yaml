@@ -74,7 +74,7 @@ MF:
   PRETRAINED_WEIGHTS: vit_1k
   ATTN_LAYER: trajectory
 MODEL:
-  NUM_CLASSES: 97
+  NUM_CLASSES: 3806
   ARCH: slow
   MODEL_NAME: Motionformer
   LOSS_FUNC: label_smoothing_cross_entropy

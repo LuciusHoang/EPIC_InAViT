@@ -1,13 +1,14 @@
 import torch
+import os
 import cv2
 import numpy as np
 from torchvision import transforms
 import torch.nn.functional as F
 from PIL import Image
-import os
+from glob import glob
 import sys
-sys.path.append(os.path.abspath("InAViT"))
 
+sys.path.append(os.path.abspath("InAViT"))
 from slowfast.models.build import build_model
 from pretrained_utils import load_pretrained, _conv_filter
 
@@ -23,58 +24,47 @@ def preprocess_frames(frames, cfg):
         transform(Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)))
         for f in frames
     ]
-    clip = torch.stack(processed, dim=1)  # Shape: [C, T, H, W]
+    clip = torch.stack(processed, dim=1)  # [C, T, H, W]
     return clip
 
 
-def sample_frames(video_path, num_frames=16, sampling_rate=4):
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    indices = np.linspace(0, total_frames - 1, num_frames * sampling_rate).astype(int)[::sampling_rate]
-    frames = []
+def load_frames_from_folder(frame_dir, num_frames=16):
+    frame_paths = sorted(glob(os.path.join(frame_dir, "*.jpg")))
+    if len(frame_paths) == 0:
+        raise ValueError(f"No frames found in {frame_dir}")
 
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-
-    cap.release()
-
-    if len(frames) < num_frames:
-        frames += [frames[-1]] * (num_frames - len(frames))
-
-    return frames[:num_frames]
+    # Uniformly sample frames
+    idx = np.linspace(0, len(frame_paths) - 1, num=num_frames).astype(int)
+    selected_paths = [frame_paths[i] for i in idx]
+    frames = [cv2.imread(p) for p in selected_paths]
+    return frames
 
 
-def predict_video(video_path, model, cfg):
-    frames = sample_frames(
-        video_path,
-        num_frames=cfg.DATA.NUM_FRAMES,
-        sampling_rate=cfg.DATA.SAMPLING_RATE
-    )
+def load_dummy_bboxes(num_frames, num_obj=4, hand=True):
+    # Replace this with actual bbox parsing if available
+    obj_boxes = torch.zeros((1, num_frames, num_obj, 4))  # [B, T, N_obj, 4]
+    hand_boxes = torch.zeros((1, num_frames, 1, 4)) if hand else None
+    return obj_boxes, hand_boxes
+
+
+def predict_segment(rgb_frame_dir, obj_frame_dir, model, cfg):
+    frames = load_frames_from_folder(rgb_frame_dir, cfg.DATA.NUM_FRAMES)
     clip = preprocess_frames(frames, cfg)
+    inputs = [clip.unsqueeze(0)]  # [1, C, T, H, W]
 
-    inputs = clip.unsqueeze(0)  # Shape: [1, C, T, H, W]
-    inputs = [inputs]  # Required input format for SlowFast/HOIViT
-
-    # Dummy bounding boxes for HOIViT
-    dummy_metadata = {
+    # Dummy bounding boxes (replace with real ones if available)
+    obj_boxes, hand_boxes = load_dummy_bboxes(cfg.DATA.NUM_FRAMES)
+    metadata = {
         "orvit_bboxes": {
-            "obj": torch.zeros((1, cfg.DATA.NUM_FRAMES, 4, 4)),
-            "hand": torch.zeros((1, cfg.DATA.NUM_FRAMES, 1, 4))
+            "obj": obj_boxes.to(model.device),
+            "hand": hand_boxes.to(model.device),
         }
     }
 
-    # Move to CPU or CUDA based on model
-    device = next(model.parameters()).device
-    inputs = [inp.to(device) for inp in inputs]
-    dummy_metadata["orvit_bboxes"]["obj"] = dummy_metadata["orvit_bboxes"]["obj"].to(device)
-    dummy_metadata["orvit_bboxes"]["hand"] = dummy_metadata["orvit_bboxes"]["hand"].to(device)
+    inputs = [inp.to(model.device) for inp in inputs]
 
     with torch.no_grad():
-        logits = model(inputs, dummy_metadata)
+        logits = model(inputs, metadata)
         if isinstance(logits, tuple):
             logits = logits[0]
 
@@ -86,12 +76,10 @@ def predict_video(video_path, model, cfg):
 
 def build_and_load_model(cfg, pretrained_path="checkpoints/checkpoint_epoch_00081.pyth"):
     model = build_model(cfg)
-
-    # ✅ Inject required default_cfg keys for load_pretrained()
     model.default_cfg = {
-        "first_conv": "patch_embed.proj",   # HOIViT input stem
-        "classifier": "head",               # default FC layer name
-        "url": ""                           # not used since we load from file
+        "first_conv": "patch_embed.proj",
+        "classifier": "head",
+        "url": ""
     }
 
     load_pretrained(
@@ -108,4 +96,5 @@ def build_and_load_model(cfg, pretrained_path="checkpoints/checkpoint_epoch_0008
 
     model.eval()
     model = model.cuda() if torch.cuda.is_available() else model
+    model.device = next(model.parameters()).device
     return model

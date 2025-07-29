@@ -1,5 +1,5 @@
 # Core ML frameworks
-torch>=1.10
+torch>=2.0.1
 torchvision>=0.11
 
 # Video and image processing
@@ -7,7 +7,7 @@ opencv-python==4.10.0.84
 numpy==1.26.4
 Pillow
 argparse
-detectron2
+detectron2  # python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
 
 # InAViT / SlowFast dependencies
 fvcore
@@ -18,8 +18,8 @@ psutil
 tensorboard
 pandas
 ffmpeg-python
-# decord # conda install -c conda-forge decord
-# av # conda install -c conda-forge av
+decord # install via github repo
+av # conda install -c conda-forge av
 filterpy
 h5py
 imgaug
