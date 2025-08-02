@@ -11,12 +11,11 @@ sys.path.append(os.path.abspath("InAViT"))
 from slowfast.config.defaults import get_cfg
 from inavit_inference import predict_segment, build_and_load_model
 
-# ✅ Update this path to where EPIC test list CSV lives
-EPIC_TEST_LIST = "EPIC_100_test_segments.csv"  # must have 'segment_id' column
+# ✅ Path to EPIC test segment CSV file (must contain 'segment_id' column)
+EPIC_TEST_LIST = "EPIC_100_test_segments.csv"
 
-# ✅ Update base paths for frame folders (extracted from .tar)
-RGB_BASE = "/Volumes/T7_Shield/frames_rgb_flow/rgb/test"
-OBJ_BASE = "/Volumes/T7_Shield/object_detection_images/test"
+# ✅ Path to the raw video clips (test set)
+VIDEO_BASE = "/Volumes/T7_Shield/videos/test"
 
 def main():
     # Load and configure model
@@ -38,18 +37,14 @@ def main():
 
     for i, segment_id in enumerate(segment_ids, 1):
         participant = segment_id.split("_")[0]
-        rgb_dir = os.path.join(RGB_BASE, participant, segment_id)
-        obj_dir = os.path.join(OBJ_BASE, participant, segment_id)
+        video_path = os.path.join(VIDEO_BASE, participant, f"{segment_id}.MP4")
 
-        if not os.path.exists(rgb_dir):
-            print(f"[WARN] RGB path missing: {rgb_dir}")
-            continue
-        if not os.path.exists(obj_dir):
-            print(f"[WARN] Object path missing: {obj_dir}")
+        if not os.path.exists(video_path):
+            print(f"[WARN] Video path missing: {video_path}")
             continue
 
         print(f"\n▶️ [{i}/{total}] Predicting {segment_id}")
-        pred_idx, conf = predict_segment(rgb_dir, obj_dir, model, cfg)
+        pred_idx, conf = predict_segment(video_path, None, model, cfg)
 
         results.append({
             "segment_id": segment_id,
@@ -64,7 +59,7 @@ def main():
         print(f"⏱️  Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s")
         print(f"✅ Action ID: {pred_idx} | Confidence: {conf:.4f}")
 
-    # Save predictions
+    # Save predictions to results
     os.makedirs("results", exist_ok=True)
     with open("results/inavit_predictions.json", "w") as f:
         json.dump(results, f, indent=2)

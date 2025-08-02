@@ -5,54 +5,41 @@ import numpy as np
 from torchvision import transforms
 import torch.nn.functional as F
 from PIL import Image
-from glob import glob
 import sys
 
+# Add InAViT to the import path
 sys.path.append(os.path.abspath("InAViT"))
+
 from slowfast.models.build import build_model
 from pretrained_utils import load_pretrained, _conv_filter
+from slowfast.datasets.ek_MF.frame_loader import pack_frames_to_video_clip
 
 
-def preprocess_frames(frames, cfg):
-    transform = transforms.Compose([
-        transforms.Resize(cfg.DATA.TEST_CROP_SIZE),
-        transforms.CenterCrop(cfg.DATA.TEST_CROP_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=cfg.DATA.MEAN, std=cfg.DATA.STD),
-    ])
-    processed = [
-        transform(Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)))
-        for f in frames
-    ]
-    clip = torch.stack(processed, dim=1)  # [C, T, H, W]
-    return clip
-
-
-def load_frames_from_folder(frame_dir, num_frames=16):
-    frame_paths = sorted(glob(os.path.join(frame_dir, "*.jpg")))
-    if len(frame_paths) == 0:
-        raise ValueError(f"No frames found in {frame_dir}")
-
-    # Uniformly sample frames
-    idx = np.linspace(0, len(frame_paths) - 1, num=num_frames).astype(int)
-    selected_paths = [frame_paths[i] for i in idx]
-    frames = [cv2.imread(p) for p in selected_paths]
-    return frames
+def preprocess_clip(clip, cfg):
+    # Assumes clip is already shaped [1, C, T, H, W] and normalized
+    if isinstance(clip, torch.Tensor):
+        return clip
+    raise TypeError("Input clip must be a torch Tensor")
 
 
 def load_dummy_bboxes(num_frames, num_obj=4, hand=True):
-    # Replace this with actual bbox parsing if available
-    obj_boxes = torch.zeros((1, num_frames, num_obj, 4))  # [B, T, N_obj, 4]
+    # Dummy bounding boxes in expected format [B, T, N_obj, 4]
+    obj_boxes = torch.zeros((1, num_frames, num_obj, 4))
     hand_boxes = torch.zeros((1, num_frames, 1, 4)) if hand else None
     return obj_boxes, hand_boxes
 
 
-def predict_segment(rgb_frame_dir, obj_frame_dir, model, cfg):
-    frames = load_frames_from_folder(rgb_frame_dir, cfg.DATA.NUM_FRAMES)
-    clip = preprocess_frames(frames, cfg)
-    inputs = [clip.unsqueeze(0)]  # [1, C, T, H, W]
+def predict_segment(video_path, obj_dir, model, cfg):
+    # Load and preprocess frames from a video file
+    clip = pack_frames_to_video_clip(
+        video_path,
+        num_frames=cfg.DATA.NUM_FRAMES,
+        sampling_rate=cfg.DATA.SAMPLING_RATE
+    )
 
-    # Dummy bounding boxes (replace with real ones if available)
+    inputs = [clip.to(model.device)]  # [1, C, T, H, W]
+
+    # Dummy bounding boxes (replace with real ones if desired)
     obj_boxes, hand_boxes = load_dummy_bboxes(cfg.DATA.NUM_FRAMES)
     metadata = {
         "orvit_bboxes": {
@@ -61,13 +48,10 @@ def predict_segment(rgb_frame_dir, obj_frame_dir, model, cfg):
         }
     }
 
-    inputs = [inp.to(model.device) for inp in inputs]
-
     with torch.no_grad():
         logits = model(inputs, metadata)
         if isinstance(logits, tuple):
             logits = logits[0]
-
         probs = F.softmax(logits, dim=1)
         conf, pred_idx = torch.max(probs, dim=1)
 

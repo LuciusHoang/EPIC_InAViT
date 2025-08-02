@@ -5,7 +5,9 @@ explore_data.py
 /checkpoints/
 /results/
 /decord/
+/decord_old/
 /EK_data/
+/archived/
 
 # Clone from https://github.com/LAHAproject/InAViT.git
 /InAViT/
