@@ -1,6 +1,5 @@
 import os
 import json
-import torch
 import time
 import sys
 import pandas as pd
@@ -11,60 +10,76 @@ sys.path.append(os.path.abspath("InAViT"))
 from slowfast.config.defaults import get_cfg
 from inavit_inference import predict_segment, build_and_load_model
 
-# ✅ Path to EPIC test segment CSV file (must contain 'segment_id' column)
-EPIC_TEST_LIST = "EPIC_100_test_segments.csv"
+# ✅ Paths
+EPIC_TEST_LIST = "EPIC_100_test_segments.csv"  # must contain 'narration_id' or 'segment_id'
+FRAMES_BASE = "/Volumes/T7_Shield/inference/frames_rgb_flow/rgb/test"  # extracted RGB frames
 
-# ✅ Path to the raw video clips (test set)
-VIDEO_BASE = "/Volumes/T7_Shield/videos/test"
+def _get_segment_ids(csv_path):
+    df = pd.read_csv(csv_path)
+
+    # Prefer 'narration_id', fallback to 'segment_id'
+    id_col = "narration_id" if "narration_id" in df.columns else (
+        "segment_id" if "segment_id" in df.columns else None
+    )
+    if id_col is None:
+        raise KeyError("CSV must contain 'narration_id' or 'segment_id'.")
+
+    # If present, preserve any prior sorting (e.g., by start_frame) in the file
+    seg_ids = df[id_col].astype(str).tolist()
+    return seg_ids
+
+def _frames_dir_for(segment_id):
+    """
+    Convert 'P01_11_XXXX' or 'P01_11' → {FRAMES_BASE}/P01/P01_11/
+    Only the first two tokens (PXX_YY) map to the folder name.
+    """
+    base_id = "_".join(segment_id.split("_")[:2])  # PXX_YY
+    participant = base_id.split("_")[0]            # PXX
+    return os.path.join(FRAMES_BASE, participant, base_id)
 
 def main():
     # Load and configure model
     cfg = get_cfg()
     cfg.merge_from_file("EK_INAVIT_MF_ant.yaml")
-    cfg.MODEL.NUM_CLASSES = 3806  # EPIC-KITCHENS action classes
     cfg.TRAIN.ENABLE = False
     cfg.TEST.ENABLE = True
 
     model = build_and_load_model(cfg)
     model.eval()
 
-    df = pd.read_csv(EPIC_TEST_LIST)
-    segment_ids = df["segment_id"].tolist()
+    segment_ids = _get_segment_ids(EPIC_TEST_LIST)
 
     results = []
     total = len(segment_ids)
     start_time = time.time()
 
     for i, segment_id in enumerate(segment_ids, 1):
-        participant = segment_id.split("_")[0]
-        video_path = os.path.join(VIDEO_BASE, participant, f"{segment_id}.MP4")
+        frames_dir = _frames_dir_for(segment_id)
 
-        if not os.path.exists(video_path):
-            print(f"[WARN] Video path missing: {video_path}")
+        if not os.path.isdir(frames_dir):
+            print(f"[WARN] Missing frames dir → {frames_dir}")
             continue
 
-        print(f"\n▶️ [{i}/{total}] Predicting {segment_id}")
-        pred_idx, conf = predict_segment(video_path, None, model, cfg)
+        print(f"\n▶️ [{i}/{total}] {segment_id}")
+        pred_idx, conf = predict_segment(frames_dir, obj_dir=None, model=model, cfg=cfg)
 
         results.append({
-            "segment_id": segment_id,
-            "pred_idx": pred_idx,
-            "confidence": float(conf)
+            "segment_id": segment_id,       # <-- matches evaluate_predictions.py
+            "pred_idx": int(pred_idx),      # <-- matches evaluate_predictions.py
+            "confidence": float(conf),      # <-- matches evaluate_predictions.py
         })
 
         elapsed = time.time() - start_time
-        avg_time = elapsed / i
-        eta = avg_time * (total - i)
+        avg = elapsed / i
+        eta = avg * (total - i)
+        print(f"⏱  elapsed {elapsed:.1f}s | ETA {eta:.1f}s | pred {pred_idx} (conf {conf:.4f})")
 
-        print(f"⏱️  Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s")
-        print(f"✅ Action ID: {pred_idx} | Confidence: {conf:.4f}")
-
-    # Save predictions to results
+    # Save predictions
     os.makedirs("results", exist_ok=True)
     with open("results/inavit_predictions.json", "w") as f:
         json.dump(results, f, indent=2)
 
-    print("\n✅ Inference complete. Predictions saved to results/inavit_predictions.json.")
+    print("\n✅ Inference complete → results/inavit_predictions.json")
 
 if __name__ == "__main__":
     main()
