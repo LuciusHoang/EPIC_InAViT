@@ -18,7 +18,7 @@ psutil
 tensorboard
 pandas
 ffmpeg-python
-# decord # install via github repo
+# decord # replaced by opencv
 av # conda install -c conda-forge av
 filterpy
 h5py

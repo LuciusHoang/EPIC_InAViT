@@ -1,5 +1,8 @@
 # Ignore specific files
-explore_data.py
+extract_pkl.py
+create_test_label.py
+EPIC_100_test_labels.csv
+EPIC_100_test_segments.csv
 last_narration_per_video.csv
 last_narration_per_video.xlsx
 EPIC_100_validation.pkl
