@@ -1,45 +1,35 @@
+import os
 import json
-from collections import Counter
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any, Iterable
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, classification_report
-
 
 # ========= Paths (edit if needed) =========
-PREDICTIONS_FILE = "results/inavit_predictions.json"
-
-# Ground truth CSV can be as small as:
-#   - uid, action_id
-# or richer versions with verb/noun columns.
+PREDICTIONS_FILE = "results/inavit_predictions.json"   # .json OR .jsonl supported
 GROUND_TRUTH_FILE = "EPIC_100_test_labels.csv"
 
-# ========= Column candidates =========
-# (Updated: prefer 'uid' first; also accept narration_id/segment_id/id)
+# ========= Column candidates (GT) =========
 ID_CANDIDATES = ["uid", "narration_id", "segment_id", "id"]
 VERB_CANDIDATES = ["verb_id", "verb_cls", "verb", "verb_class"]
 NOUN_CANDIDATES = ["noun_id", "noun_cls", "noun", "noun_class"]
 ACTION_CANDIDATES = ["action_id", "action_cls", "action"]
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def _pick_col(df: pd.DataFrame, candidates: List[str], kind: str) -> Optional[str]:
+# --------------------------------------------------------
+# I/O helpers
+# --------------------------------------------------------
+def _pick_col(df: pd.DataFrame, candidates: List[str], required_name: str) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
             return c
-    # It's okay to return None for verb/noun if your CSV doesn't have them
-    if kind in ("verb", "noun"):
+    if required_name in ("verb", "noun"):
         return None
-    raise KeyError(f"Ground truth CSV must contain a {kind} column in {candidates}")
-
+    raise KeyError(f"Ground truth CSV must contain a {required_name} column from: {candidates}")
 
 def load_ground_truth(csv_path: str) -> Tuple[Dict[str, Dict[str, Optional[int]]], Dict[str, str]]:
     """
     Returns:
-      gt: {segment_id_str: {'verb': int|None, 'noun': int|None, 'action': int}}
+      gt_map: {segment_id_str: {'verb': int|None, 'noun': int|None, 'action': int}}
       cols: resolved column names
     """
     df = pd.read_csv(csv_path)
@@ -49,249 +39,346 @@ def load_ground_truth(csv_path: str) -> Tuple[Dict[str, Dict[str, Optional[int]]
     noun_col = _pick_col(df, NOUN_CANDIDATES, "noun")
     action_col = _pick_col(df, ACTION_CANDIDATES, "action label")
 
-    keep_cols = [c for c in [id_col, verb_col, noun_col, action_col] if c is not None]
-    df = df[keep_cols].dropna(subset=[id_col, action_col])
+    keep = [c for c in [id_col, verb_col, noun_col, action_col] if c]
+    df = df[keep].dropna(subset=[id_col, action_col])
 
-    # enforce types
     df[id_col] = df[id_col].astype(str)
-    if verb_col:   df[verb_col] = df[verb_col].astype(int)
-    if noun_col:   df[noun_col] = df[noun_col].astype(int)
+    if verb_col: df[verb_col] = df[verb_col].astype(int)
+    if noun_col: df[noun_col] = df[noun_col].astype(int)
     df[action_col] = df[action_col].astype(int)
 
-    gt = {}
+    gt_map: Dict[str, Dict[str, Optional[int]]] = {}
     for _, r in df.iterrows():
         sid = str(r[id_col])
-        gt[sid] = {
+        gt_map[sid] = {
             "verb": int(r[verb_col]) if verb_col else None,
             "noun": int(r[noun_col]) if noun_col else None,
             "action": int(r[action_col]),
         }
-    cols = {"id": id_col, "verb": verb_col, "noun": noun_col, "action": action_col}
-    return gt, cols
+    return gt_map, {"id": id_col, "verb": verb_col, "noun": noun_col, "action": action_col}
 
-
-def load_predictions(json_path: str):
+def _iter_json_records(path: str) -> Iterable[dict]:
     """
-    Accepts two formats:
-
-    (A) Action-only:
-      {"segment_id": "P01_11_000", "pred_idx": 1234, "confidence": 0.77}
-      or with id under "uid"/"narration_id"/"id"
-
-    (B) Full InAViT-style:
-      {
-        "segment_id": "...",   # or uid/narration_id/id
-        "verb_top5":   [v1,...,v5],   "verb_scores": [s1,...,s5],
-        "noun_top5":   [n1,...,n5],   "noun_scores": [s1,...,s5],
-        "action_top5": [a1,...,a5],   "action_scores":[s1,...,s5]
-      }
+    Supports:
+      - JSON list  (file ends with .json)
+      - JSON Lines (file ends with .jsonl OR content is newline-delimited objects)
     """
-    with open(json_path, "r") as f:
-        raw = json.load(f)
+    if path.endswith(".jsonl"):
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+        return
 
-    preds = {}
-    for item in raw:
-        # robust id key detection
-        sid = None
-        for k in ("segment_id", "uid", "narration_id", "id"):
-            if k in item and item[k] not in (None, ""):
-                sid = str(item[k])
-                break
-        if not sid:
+    # Try as a single JSON doc
+    with open(path, "r") as f:
+        txt = f.read().strip()
+    if not txt:
+        return
+    # If it looks like a list, load once
+    if txt[0] == "[":
+        data = json.loads(txt)
+        for rec in data:
+            yield rec
+        return
+    # Otherwise assume jsonl but misnamed
+    for line in txt.splitlines():
+        line = line.strip()
+        if line:
+            yield json.loads(line)
+
+def _first_nonempty(d: dict, keys: List[str]) -> Optional[Any]:
+    for k in keys:
+        if k in d and d[k] not in (None, "", []):
+            return d[k]
+    return None
+
+def load_predictions(path: str) -> Dict[str, dict]:
+    """
+    Builds a map: preds[sid] = {
+        'verb':   {'top5': [..], 'scores': [..]} OR {'logits': [..]},
+        'noun':   {...},
+        'action': {...}   (top5/scores or logits or top1 fallback)
+    }
+    Accepts keys:
+      - top5 arrays:    '*_top5_idx', '*_top5'
+      - scores arrays:  '*_top5_scores', '*_scores'
+      - raw logits:     '*_logits'
+      - ids:            'segment_id', 'uid', 'narration_id', 'id'
+      - action top1:    'pred_idx' or 'action_id' (fallback)
+    """
+    preds: Dict[str, dict] = {}
+    for item in _iter_json_records(path):
+        sid = _first_nonempty(item, ["segment_id", "uid", "narration_id", "id"])
+        if sid is None:
             continue
+        sid = str(sid)
 
-        record = {}
+        rec = preds.get(sid, {})
 
-        # Full heads (preferred)
         for head in ("verb", "noun", "action"):
-            tk = f"{head}_top5"
-            if tk in item and isinstance(item[tk], list) and len(item[tk]) > 0:
-                # coerce to ints where possible
-                top5 = []
-                for x in item[tk]:
+            h = rec.get(head, {})
+
+            # logits (preferred for deriving top-5 reliably)
+            logits = item.get(f"{head}_logits")
+            if isinstance(logits, list) and logits:
+                h["logits"] = logits
+
+            # top5 indices (various key names)
+            t5 = _first_nonempty(item, [f"{head}_top5_idx", f"{head}_top5"])
+            if isinstance(t5, list) and t5:
+                try:
+                    t5 = [int(x) for x in t5]
+                except Exception:
+                    pass
+                h["top5"] = t5
+
+            # top5 scores (optional)
+            sc = _first_nonempty(item, [f"{head}_top5_scores", f"{head}_scores"])
+            if isinstance(sc, list) and sc and (h.get("top5") and len(sc) == len(h["top5"])):
+                h["scores"] = sc
+
+            # action top1 fallback
+            if head == "action" and "top5" not in h and "logits" not in h:
+                a1 = _first_nonempty(item, ["pred_idx", "action_id"])
+                if a1 is not None:
                     try:
-                        top5.append(int(x))
+                        a1 = int(a1)
                     except Exception:
-                        top5.append(x)
-                record[head] = {"top5": top5}
+                        pass
+                    h["top1"] = a1
 
-        # Action-only fallback (top1)
-        if "action" not in record:
-            # accept either "pred_idx" or "action_id" for single-head predictions
-            for key in ("pred_idx", "action_id"):
-                if key in item:
-                    try:
-                        record["action"] = {"top1": int(item[key])}
-                    except Exception:
-                        record["action"] = {"top1": item[key]}
-                    break
+            if h:
+                rec[head] = h
 
-        preds[sid] = record
-
+        preds[sid] = rec
     return preds
 
+# --------------------------------------------------------
+# Metrics
+# --------------------------------------------------------
+def _softmax_1d(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x)
+    e = np.exp(x, dtype=np.float64)
+    return e / np.sum(e)
 
-def topk_recall(gt: List[int], pred_topk: List[List[int]], k: int = 5) -> float:
-    hit = 0
-    for y, topk in zip(gt, pred_topk):
-        if y in (topk[:k] if topk is not None else []):
-            hit += 1
-    return hit / max(1, len(gt))
+def _topk_from_logits(logits: List[float], k: int) -> List[int]:
+    arr = np.asarray(logits, dtype=np.float64)
+    if arr.ndim != 1:
+        arr = arr.reshape(-1)
+    # argpartition for speed, then sort the selected
+    if k >= arr.size:
+        order = np.argsort(-arr)
+        return order.tolist()
+    idx = np.argpartition(-arr, kth=k-1)[:k]
+    # sort those by value desc
+    idx = idx[np.argsort(-arr[idx])]
+    return idx.tolist()
 
+def sample_topk_recall(gt: List[int], pred_topk: List[List[int]], k: int = 5) -> float:
+    """Sample-averaged Top-k recall."""
+    hits = 0
+    n = 0
+    for y, tk in zip(gt, pred_topk):
+        if tk is None:
+            continue
+        n += 1
+        if y in tk[:k]:
+            hits += 1
+    return (hits / n) if n else 0.0
 
-def mean_topk_recall(gt: List[int], pred_topk: List[List[int]], k: int = 5) -> float:
+# --------------------------------------------------------
+# Joint action top-5 from verb/noun
+# --------------------------------------------------------
+def joint_action_top5_from_logits(verb_logits: List[float], noun_logits: List[float],
+                                  kv: int = 20, kn: int = 20) -> List[Tuple[int, int]]:
+    """Return top-5 (verb_id, noun_id) by product of softmax probabilities."""
+    vp = _softmax_1d(np.asarray(verb_logits, dtype=np.float64))
+    np_ = _softmax_1d(np.asarray(noun_logits, dtype=np.float64))
+
+    # prune to Kv, Kn for speed
+    kv = min(kv, vp.size)
+    kn = min(kn, np_.size)
+    topv = _topk_from_logits(vp.tolist(), kv)
+    topn = _topk_from_logits(np_.tolist(), kn)
+
+    cand: List[Tuple[Tuple[int, int], float]] = []
+    for v in topv:
+        pv = vp[v]
+        # multiply across all kept nouns
+        scores = pv * np_[topn]  # vectorized
+        for j, n in enumerate(topn):
+            cand.append(((v, n), float(scores[j])))
+
+    cand.sort(key=lambda x: -x[1])
+    return [vn for (vn, _) in cand[:5]]
+
+def joint_action_top5_from_lists(verb_top5: List[int],
+                                 noun_top5: List[int],
+                                 verb_scores: Optional[List[float]] = None,
+                                 noun_scores: Optional[List[float]] = None) -> List[Tuple[int, int]]:
     """
-    Class-averaged top-k recall over the classes present in gt.
+    If we only have top-5 lists (and optionally scores), form all 25 pairs and take the best 5.
+    If scores are missing, treat each verb/noun top-5 as equal weight.
     """
-    per_class_hits = Counter()
-    per_class_counts = Counter()
+    cand: List[Tuple[Tuple[int, int], float]] = []
+    for i, v in enumerate(verb_top5):
+        for j, n in enumerate(noun_top5):
+            sv = verb_scores[i] if (verb_scores and i < len(verb_scores)) else 1.0
+            sn = noun_scores[j] if (noun_scores and j < len(noun_scores)) else 1.0
+            cand.append(((v, n), float(sv * sn)))
+    cand.sort(key=lambda x: -x[1])
+    return [vn for (vn, _) in cand[:5]]
 
-    for y, topk in zip(gt, pred_topk):
-        per_class_counts[y] += 1
-        if y in (topk[:k] if topk is not None else []):
-            per_class_hits[y] += 1
-
-    recalls = []
-    for c in per_class_counts:
-        recalls.append(per_class_hits[c] / per_class_counts[c])
-    return float(np.mean(recalls)) if recalls else 0.0
-
-
-def _gather_pairs(
-    gt_map: Dict[str, Dict[str, Optional[int]]],
-    preds_map: Dict[str, dict],
-    head: str,
-) -> Tuple[List[int], List[int], List[List[int]]]:
+# --------------------------------------------------------
+# Pairing GT & Preds
+# --------------------------------------------------------
+def _gather_head_top5(gt_map: Dict[str, Dict[str, Optional[int]]],
+                      preds_map: Dict[str, dict],
+                      head: str) -> Tuple[List[int], List[Optional[List[int]]]]:
     """
     Returns:
-      y_true_top1, y_pred_top1, y_pred_top5_lists
-    Some entries may miss top1 or top5 depending on your prediction format.
+      y_true: list[int]
+      pred_top5: list[list[int] or None] aligned to y_true
     """
-    y_true, y_pred1, y_pred5 = [], [], []
-    for sid, gt_rec in gt_map.items():
-        if sid not in preds_map:
+    y_true: List[int] = []
+    pred_t5: List[Optional[List[int]]] = []
+    for sid, gt in gt_map.items():
+        if head not in gt or gt[head] is None:
             continue
-        pred_rec = preds_map[sid].get(head, None)
-        y = gt_rec.get(head, None)
-        if y is None or pred_rec is None:
-            continue
+        y = int(gt[head])
 
-        # true label
-        try:
-            y = int(y)
-        except Exception:
-            pass
+        pred = preds_map.get(sid, {}).get(head, {})
+        t5 = None
 
-        # predicted
-        top1 = None
-        top5 = None
-        if "top5" in pred_rec and pred_rec["top5"]:
-            top5 = pred_rec["top5"]
-            top1 = top5[0]
-        if "top1" in pred_rec and pred_rec["top1"] is not None:
-            top1 = pred_rec["top1"]
+        # direct top-5
+        if isinstance(pred.get("top5"), list) and pred["top5"]:
+            t5 = [int(x) if isinstance(x, (int, np.integer, str)) and str(x).isdigit() else x
+                  for x in pred["top5"]]
 
-        if top1 is not None:
-            try:
-                top1 = int(top1)
-            except Exception:
-                pass
+        # derive from logits if needed
+        elif isinstance(pred.get("logits"), list) and pred["logits"]:
+            t5 = _topk_from_logits(pred["logits"], 5)
 
-        # Append
         y_true.append(y)
-        y_pred1.append(top1 if top1 is not None else -1)
-        y_pred5.append(top5 if top5 is not None else [])
-    return y_true, y_pred1, y_pred5
+        pred_t5.append(t5)
+    return y_true, pred_t5
 
+def _gather_action_top5(gt_map: Dict[str, Dict[str, Optional[int]]],
+                        preds_map: Dict[str, dict]) -> Tuple[List[Tuple[Optional[int], Optional[int], int]],
+                                                             List[Optional[List[int]]],
+                                                             List[Optional[List[Tuple[int, int]]]]]:
+    """
+    Returns:
+      gt_triplets: [(verb_gt or None, noun_gt or None, action_gt)]
+      action_pred_top5_ids: [list[int] or None]  (when model gave flat action top-5)
+      action_pred_top5_pairs: [list[(v,n)] or None] (when derived jointly)
+    """
+    gt_triplets: List[Tuple[Optional[int], Optional[int], int]] = []
+    act_top5_ids: List[Optional[List[int]]] = []
+    act_top5_pairs: List[Optional[List[Tuple[int, int]]]] = []
 
-def _print_headline(title: str):
-    print("\n" + "=" * 72)
-    print(title)
-    print("=" * 72)
+    for sid, gt in gt_map.items():
+        a_gt = gt.get("action", None)
+        if a_gt is None:
+            continue
 
+        pred = preds_map.get(sid, {}).get("action", {})
+        # 1) direct action top-5 (if provided)
+        t5_ids = None
+        if isinstance(pred.get("top5"), list) and pred["top5"]:
+            t5_ids = [int(x) if isinstance(x, (int, np.integer, str)) and str(x).isdigit() else x
+                      for x in pred["top5"]]
 
-# -----------------------------
-# Public API
-# -----------------------------
-def evaluate(save_report: bool = True):
+        # 2) joint from logits or from top-5 lists if not provided
+        t5_pairs = None
+        if t5_ids is None:
+            vpred = preds_map.get(sid, {}).get("verb", {})
+            npred = preds_map.get(sid, {}).get("noun", {})
+
+            # Prefer logits (accurate)
+            if isinstance(vpred.get("logits"), list) and isinstance(npred.get("logits"), list):
+                t5_pairs = joint_action_top5_from_logits(vpred["logits"], npred["logits"])
+            # Fall back to lists (+optional scores)
+            elif isinstance(vpred.get("top5"), list) and isinstance(npred.get("top5"), list):
+                t5_pairs = joint_action_top5_from_lists(
+                    vpred["top5"], npred["top5"], vpred.get("scores"), npred.get("scores")
+                )
+
+        gt_triplets.append((gt.get("verb"), gt.get("noun"), a_gt))
+        act_top5_ids.append(t5_ids)
+        act_top5_pairs.append(t5_pairs)
+
+    return gt_triplets, act_top5_ids, act_top5_pairs
+
+# --------------------------------------------------------
+# Evaluation (Top-5 only)
+# --------------------------------------------------------
+def evaluate_top5_only(save_report: bool = True):
     # Load
     gt_map, cols = load_ground_truth(GROUND_TRUTH_FILE)
     preds_map = load_predictions(PREDICTIONS_FILE)
 
-    total_pred = len(preds_map)
     overlap = len(set(gt_map.keys()) & set(preds_map.keys()))
-    print(f"Loaded GT: {len(gt_map)} segments | Predictions: {total_pred} | Overlap: {overlap}")
+    print(f"Loaded GT: {len(gt_map)} | Predictions: {len(preds_map)} | Overlap: {overlap}")
     print(f"Resolved GT columns: {cols}")
 
-    report_rows = []
-    summary = {}
+    summary: Dict[str, float] = {}
+    rows: List[dict] = []
 
-    for head, nice in [("action", "Action"), ("verb", "Verb"), ("noun", "Noun")]:
-        y_true, y_pred1, y_pred5 = _gather_pairs(gt_map, preds_map, head)
+    # ---- Verb ----
+    yv_true, yv_pred5 = _gather_head_top5(gt_map, preds_map, "verb")
+    verb_t5 = sample_topk_recall(yv_true, yv_pred5, k=5) if yv_true else 0.0
+    if yv_true:
+        print(f"Verb   Top-5 Recall: {verb_t5:.4f}")
+        summary["Top5_Recall_Verb"] = float(verb_t5)
+        rows.append({"head": "verb", "num_samples": len(yv_true), "top5_recall": float(verb_t5)})
 
-        if not y_true:
+    # ---- Noun ----
+    yn_true, yn_pred5 = _gather_head_top5(gt_map, preds_map, "noun")
+    noun_t5 = sample_topk_recall(yn_true, yn_pred5, k=5) if yn_true else 0.0
+    if yn_true:
+        print(f"Noun   Top-5 Recall: {noun_t5:.4f}")
+        summary["Top5_Recall_Noun"] = float(noun_t5)
+        rows.append({"head": "noun", "num_samples": len(yn_true), "top5_recall": float(noun_t5)})
+
+    # ---- Action ----
+    gt_triplets, act_top5_ids, act_top5_pairs = _gather_action_top5(gt_map, preds_map)
+
+    # Strategy:
+    #  A) If action top-5 IDs are present, use those against action_gt.
+    #  B) Else if (verb_gt, noun_gt) exist and we have joint top-5 pairs, treat hit if pair is present.
+    action_hits = 0
+    action_count = 0
+
+    for (v_gt, n_gt, a_gt), t5_ids, t5_pairs in zip(gt_triplets, act_top5_ids, act_top5_pairs):
+        if t5_ids is not None:
+            # direct flat action top-5
+            action_count += 1
+            if a_gt in t5_ids[:5]:
+                action_hits += 1
+        elif t5_pairs is not None and v_gt is not None and n_gt is not None:
+            action_count += 1
+            if (int(v_gt), int(n_gt)) in t5_pairs[:5]:
+                action_hits += 1
+        else:
+            # cannot evaluate this sample for action top-5
             continue
 
-        _print_headline(f"{nice} metrics")
+    action_t5 = (action_hits / action_count) if action_count else 0.0
+    if action_count:
+        print(f"Action Top-5 Recall: {action_t5:.4f}  (evaluated on {action_count} samples)")
+        summary["Top5_Recall_Action"] = float(action_t5)
+        rows.append({"head": "action", "num_samples": int(action_count), "top5_recall": float(action_t5)})
 
-        # Top-1 (sample-avg)
-        y_true_t1, y_pred_t1 = [], []
-        for t, p in zip(y_true, y_pred1):
-            if p is not None and p != -1:
-                y_true_t1.append(t)
-                y_pred_t1.append(p)
-        top1 = accuracy_score(y_true_t1, y_pred_t1) if y_true_t1 else 0.0
-        print(f"Top-1 accuracy (sample-avg): {top1:.3f}")
-
-        # Top-5 recall (sample-avg) + Mean Top-5 (class-avg)
-        has_top5 = any(len(lst) > 0 for lst in y_pred5)
-        if has_top5:
-            t5 = topk_recall(y_true, y_pred5, k=5)
-            mt5 = mean_topk_recall(y_true, y_pred5, k=5)
-            print(f"Top-5 recall  (sample-avg): {t5:.3f}")
-            print(f"Mean Top-5 recall (class-avg over classes present in subset): {mt5:.3f}")
-        else:
-            t5, mt5 = None, None
-            print("Top-5 lists not found in predictions → skipping Top-5 metrics for this head.")
-
-        # Brief per-class report (Top-1)
-        try:
-            print("\nPer-class precision/recall/f1 (Top-1) — truncated to first 10 classes:")
-            cr = classification_report(y_true_t1, y_pred_t1, digits=3, zero_division=0, output_dict=True)
-            printed = 0
-            for cls_id, stats in cr.items():
-                if isinstance(stats, dict) and cls_id not in ("accuracy", "macro avg", "weighted avg"):
-                    print(f"  class {cls_id:>4}: p={stats.get('precision',0):.3f} "
-                          f"r={stats.get('recall',0):.3f} f1={stats.get('f1-score',0):.3f} "
-                          f"n={stats.get('support',0)}")
-                    printed += 1
-                    if printed >= 10:
-                        break
-        except Exception:
-            pass
-
-        # Collect summary & row
-        summary[f"{nice}_Top1"] = float(top1)
-        if has_top5:
-            summary[f"{nice}_Top5"] = float(t5)
-            summary[f"{nice}_MeanTop5"] = float(mt5)
-
-        report_rows.append({
-            "head": nice.lower(),
-            "num_pairs": len(y_true),
-            "top1_acc": float(top1),
-            "top5_recall": float(t5) if t5 is not None else np.nan,
-            "mean_top5_recall": float(mt5) if mt5 is not None else np.nan,
-        })
-
-    # Save a compact CSV report if requested
-    if save_report and report_rows:
-        rep_df = pd.DataFrame(report_rows)
-        rep_df.to_csv("results/eval_report.csv", index=False)
+    # ---- Save report ----
+    if save_report:
+        os.makedirs("results", exist_ok=True)
+        pd.DataFrame(rows).to_csv("results/eval_report.csv", index=False)
         with open("results/eval_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
-        print("\nSaved: results/eval_report.csv and results/eval_summary.json")
-
+        print("Saved: results/eval_report.csv, results/eval_summary.json")
 
 if __name__ == "__main__":
-    evaluate(save_report=True)
+    evaluate_top5_only(save_report=True)
