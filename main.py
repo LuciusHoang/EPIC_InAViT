@@ -8,6 +8,7 @@ import traceback
 from typing import List, Optional, Dict, Any
 
 import pandas as pd
+import torch
 
 # Make InAViT importable (expects repo folder "InAViT" in project root)
 sys.path.append(os.path.abspath("InAViT"))
@@ -122,10 +123,31 @@ def build_cfg(cfg_path: str):
 
 
 # -------------------------------------------------
+# Model head probing (verb/noun only)
+# -------------------------------------------------
+def _heads_present(model) -> Dict[str, bool]:
+    """
+    Return which classifier heads exist on the model (best-effort). Only verb/noun here.
+    """
+    present = {"verb": False, "noun": False}
+    name_map = {
+        "verb": ["head0", "verb_head", "head_verb"],
+        "noun": ["head1", "noun_head", "head_noun"],
+    }
+    for key, names in name_map.items():
+        for n in names:
+            mod = getattr(model, n, None)
+            if isinstance(mod, torch.nn.Linear):
+                present[key] = True
+                break
+    return present
+
+
+# -------------------------------------------------
 # Main
 # -------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="InAViT | EK100 Anticipation Inference (Top-5)")
+    parser = argparse.ArgumentParser(description="InAViT | EK100 Anticipation Inference (Top-5, verb/noun only)")
     parser.add_argument("--csv", default=DEFAULT_CSV, help="Path to EPIC test segments CSV")
     parser.add_argument("--frames-base", default=DEFAULT_FRAMES_BASE, help="RGB frames root")
     parser.add_argument("--obj-base", default=DEFAULT_OBJ_BASE, help="Object-detection frames root (optional)")
@@ -140,8 +162,6 @@ def main():
                         help="Comma-separated ids OR path to file with one id per line to run a subset")
     parser.add_argument("--append", action="store_true",
                         help="Append to existing JSONL instead of overwriting it")
-    parser.add_argument("--no-logits", action="store_true",
-                        help="(Kept for compatibility; predict_segment doesn't return logits in this build)")
     parser.add_argument("--quiet", action="store_true", help="Reduce console logging")
     args = parser.parse_args()
 
@@ -201,6 +221,9 @@ def main():
         print(f"[INFO] Writing JSONL to: {args.out}")
         print(f"[INFO] Anticipation mode: {is_ant}")
 
+    # Heads present (for metadata) — verb/noun only
+    heads_present = _heads_present(model)
+
     for i, row in enumerate(rows, 1):
         segment_id  = str(row[id_col])
         start_frame = int(row[start_col])
@@ -229,17 +252,17 @@ def main():
 
         try:
             # ---------- Inference ----------
-            out_raw = predict_segment(
+            out_raw: Dict[str, Any] = predict_segment(
                 frames_dir=frames_dir,
                 obj_dir=obj_dir if os.path.isdir(obj_dir) else None,
                 model=model,
                 cfg=cfg,
                 start_frame=start_frame,
                 stop_frame=stop_frame,
-                bboxes_path=chosen_bboxes,  # <- pass through
+                bboxes_path=chosen_bboxes,
             )
 
-            # Build a JSONL record that evaluator understands
+            # Build a JSONL record (verb/noun only)
             rec: Dict[str, Any] = {
                 # IDs
                 "segment_id": segment_id,
@@ -249,12 +272,15 @@ def main():
                 "start_frame": start_frame,
                 "stop_frame": stop_frame,
                 # Top-5 indices + scores
-                "action_top5_idx": out_raw.get("action_top5_idx", []),
-                "action_top5_scores": [float(x) for x in out_raw.get("action_top5_scores", [])],
-                "verb_top5_idx":   out_raw.get("verb_top5_idx", []),
+                "verb_top5_idx":    out_raw.get("verb_top5_idx", []),
                 "verb_top5_scores": [float(x) for x in out_raw.get("verb_top5_scores", [])],
-                "noun_top5_idx":   out_raw.get("noun_top5_idx", []),
+                "noun_top5_idx":    out_raw.get("noun_top5_idx", []),
                 "noun_top5_scores": [float(x) for x in out_raw.get("noun_top5_scores", [])],
+                # Small meta block for traceability
+                "meta": {
+                    "heads_present": heads_present,
+                    "bboxes_path": chosen_bboxes if chosen_bboxes else "",
+                },
             }
 
             _write_jsonl(args.out, rec)
@@ -262,16 +288,11 @@ def main():
             processed += 1
             if not args.quiet:
                 elapsed = time.time() - t0
-                act1  = _safe_top1(rec["action_top5_idx"], -1)
-                act1s = _safe_top1(rec["action_top5_scores"], 0.0)
-                if is_ant:
-                    print(f"act@1={act1}({act1s:.4f})")
-                else:
-                    v1  = _safe_top1(rec["verb_top5_idx"], -1)
-                    v1s = _safe_top1(rec["verb_top5_scores"], 0.0)
-                    n1  = _safe_top1(rec["noun_top5_idx"], -1)
-                    n1s = _safe_top1(rec["noun_top5_scores"], 0.0)
-                    print(f"act@1={act1}({act1s:.4f}) | verb@1={v1}({v1s:.3f}) | noun@1={n1}({n1s:.3f})")
+                v1  = _safe_top1(rec["verb_top5_idx"], -1)
+                v1s = _safe_top1(rec["verb_top5_scores"], 0.0)
+                n1  = _safe_top1(rec["noun_top5_idx"], -1)
+                n1s = _safe_top1(rec["noun_top5_scores"], 0.0)
+                print(f"verb@1={v1}({v1s:.3f}) | noun@1={n1}({n1s:.3f})")
                 avg = elapsed / max(processed, 1)
                 eta = avg * (total - i)
                 print(f"⏱  elapsed {elapsed:.1f}s | ETA {eta:.1f}s")
@@ -288,6 +309,10 @@ def main():
                 "uid": segment_id,
                 "video_id": _base_id(segment_id),
                 "error": str(e),
+                "meta": {
+                    "heads_present": heads_present,
+                    "bboxes_path": chosen_bboxes if chosen_bboxes else "",
+                },
             }
             _write_jsonl(args.out, fail_rec)
 

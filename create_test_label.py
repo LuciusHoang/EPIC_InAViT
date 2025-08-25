@@ -17,8 +17,8 @@ else:
 
 # Use narration_id as uid
 if "narration_id" in df.columns:
-    df = df.rename(columns={"narration_id": "uid"})
-    label_df = df[["uid", "action_id"]]
+    df = df.rename(columns={"narration_id": "uid", "verb_class": "verb_id", "noun_class": "noun_id"})
+    label_df = df[["uid", "verb_id", "noun_id", "action_id"]]
 else:
     raise KeyError("'narration_id' column not found in the CSV.")
 

@@ -1,52 +1,24 @@
-# EK_INAVIT_MF_ant.yaml — Updated for HOI boxes at test-time (CPU/MPS friendly)
-
-# ------------------------------
-# InAViT / HOI transformer bits
-# ------------------------------
 HOIVIT:
-  ENABLE: True          # make sure HOI path is active
-  O: 4                  # max objects per frame (matches our bbox builder)
+  ENABLE: True
+  O: 4
   U: 1
-  LAYERS: [1, 6, 10]
+  LAYERS: [1,6,10]
   USE_MOTION_STREAM: True
   MOTION_STREAM_ATTN_TYPE: joint
   DOUBLEATTENTION: False
-  # Hints some forks support (ignored if unknown):
-  # USE_BOXES: True
-  # BOX_COORDS_NORMALIZED: True   # we pass 0–1 coords; set False if your model expects 224-pixel coords
-
 EPICKITCHENS:
-  ANTICIPATION: True     # action-anticipation setting (action head)
+  ANTICIPATION: True
   SAVESCORES: False
-
-# ------------------------------
-# Train/Test toggles
-# ------------------------------
 TRAIN:
   ENABLE: False
   DATASET: epickitchens
-  BATCH_SIZE: 4
+  BATCH_SIZE: 20
   EVAL_PERIOD: 3
   CHECKPOINT_PERIOD: 1
   AUTO_RESUME: True
-  MIXED_PRECISION: False
+  MIXED_PRECISION: True
   CHECKPOINT_EPOCH_RESET: True
-  # Use your local relative path (not /checkpoints/… which is absolute):
-  CHECKPOINT_FILE_PATH: checkpoints/checkpoint_epoch_00081.pyth
-
-TEST:
-  ENABLE: True
-  DATASET: epickitchens
-  BATCH_SIZE: 1
-  NUM_ENSEMBLE_VIEWS: 1
-  NUM_SPATIAL_CROPS: 1
-  # Some repos have explicit test-time HOI flags. If your fork supports them, keep True:
-  # USE_HOIVIT: True
-  # USE_BOXES: True
-
-# ------------------------------
-# Data / sampling
-# ------------------------------
+  CHECKPOINT_FILE_PATH: CP/ek_motionformer_224_16x4.pyth
 DATA:
   NUM_FRAMES: 16
   SAMPLING_RATE: 4
@@ -56,8 +28,7 @@ DATA:
   INPUT_CHANNEL_NUM: [3]
   MEAN: [0.5, 0.5, 0.5]
   STD: [0.5, 0.5, 0.5]
-  PATH_TO_DATA_DIR: /Volumes/T7_Shield/inference  # not used by our main.py, but fine to keep
-
+  PATH_TO_DATA_DIR: data/epic_kitchens/
 AUG:
   NUM_SAMPLE: 1
   ENABLE: True
@@ -69,28 +40,19 @@ AUG:
   RE_MODE: pixel
   RE_COUNT: 1
   RE_SPLIT: False
-
-# ------------------------------
-# Optimization (kept for completeness)
-# ------------------------------
 SOLVER:
   HOIVIT_BASE_LR: 1e-4
   BASE_LR: 1e-5
   LR_POLICY: steps_with_relative_lrs
   LRS: [1, 0.1, 0.01]
-  STEPS: [0, 29, 60]
+  STEPS: [0, 29, 60] # originally [0, 19, 40]
   MAX_EPOCH: 100
   MOMENTUM: 0.9
   WEIGHT_DECAY: 5e-2
   WARMUP_EPOCHS: 0.0
   OPTIMIZING_METHOD: adamw
-
-# ------------------------------
-# Backbone / head
-# ------------------------------
 SLOWFAST:
   ALPHA: 8
-
 MF:
   PATCH_SIZE: 16
   PATCH_SIZE_TEMP: 2
@@ -111,24 +73,23 @@ MF:
   HEAD_ACT: tanh
   PRETRAINED_WEIGHTS: vit_1k
   ATTN_LAYER: trajectory
-
 MODEL:
-  NUM_CLASSES: 3806          # keep consistent with your checkpoint
-  ARCH: slow
+  NUM_CLASSES: 3806   # keep the checkpoint’s full action space (or whatever your ckpt has)
   MODEL_NAME: Motionformer
+  ARCH: slow
   LOSS_FUNC: label_smoothing_cross_entropy
-
-# ------------------------------
-# Loader / runtime
-# ------------------------------
+TEST:
+  ENABLE: True
+  DATASET: epickitchens
+  BATCH_SIZE: 72
+  NUM_ENSEMBLE_VIEWS: 10
+  NUM_SPATIAL_CROPS: 3
 DATA_LOADER:
-  NUM_WORKERS: 0
-  PIN_MEMORY: False
-
+  NUM_WORKERS: 8
+  PIN_MEMORY: True
 NUM_GPUS: 0
 NUM_SHARDS: 1
 RNG_SEED: 0
 OUTPUT_DIR: checkpoints/hoivit_ek_wmotion_ant
-
 TENSORBOARD:
-  ENABLE: True
+  ENABLE: True  

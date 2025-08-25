@@ -1,7 +1,8 @@
 # Ignore specific files
 extract_pkl.py
 create_test_label.py
-convert_json.py
+convert_to_inavit_boxes.py
+debug.py
 EPIC_100_test_labels.csv
 EPIC_100_test_segments.csv
 last_narration_per_video.csv

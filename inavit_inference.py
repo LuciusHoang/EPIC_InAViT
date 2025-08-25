@@ -20,30 +20,21 @@ from pretrained_utils import load_pretrained, _conv_filter
 
 
 # =========================================================
-# Utility helpers
+# Small helpers
 # =========================================================
 
 def _parse_frame_num(path: str) -> Optional[int]:
-    """
-    Parse trailing integer from frame filename.
-    Accepts: frame_0000000001.jpg  OR  0000000001.jpg
-    """
     m = re.search(r'(\d+)\.jpg$', os.path.basename(path))
     return int(m.group(1)) if m else None
 
 
 def _pil_center_crop_resize(img: Image.Image, target_size: int) -> Image.Image:
-    """
-    Resize so the shorter side == target_size, then center-crop to (target_size, target_size).
-    """
     w, h = img.size
     if min(w, h) == 0:
         return img.resize((target_size, target_size), Image.BICUBIC)
-
     scale = target_size / min(w, h)
     new_w, new_h = int(round(w * scale)), int(round(h * scale))
     img = img.resize((new_w, new_h), Image.BICUBIC)
-
     left = (new_w - target_size) // 2
     top = (new_h - target_size) // 2
     right = left + target_size
@@ -52,10 +43,6 @@ def _pil_center_crop_resize(img: Image.Image, target_size: int) -> Image.Image:
 
 
 def _uniform_indices(n_in: int, n_out: int) -> List[int]:
-    """
-    Uniformly (linearly) sample exactly n_out indices over a sequence of length n_in.
-    If n_in < n_out, repeat-pad the last index.
-    """
     if n_in <= 0:
         return [0] * n_out
     if n_out == 1:
@@ -67,8 +54,12 @@ def _uniform_indices(n_in: int, n_out: int) -> List[int]:
     return idx[:n_out]
 
 
+def _ten(x: int) -> str:
+    return f"{x:010d}"
+
+
 # =========================================================
-# RGB window loader (Ta=1s, 64→16, 224²)
+# Frame collection & sampling
 # =========================================================
 
 def _collect_rgb_frames_in_window(
@@ -76,11 +67,6 @@ def _collect_rgb_frames_in_window(
     t_star: int,
     window_len: int = 64
 ) -> Tuple[List[str], List[int]]:
-    """
-    Collect all candidate frame paths in the observed window [t_star - (window_len-1), t_star].
-    The directory is expected to contain files named 'frame_%010d.jpg' (preferred)
-    or plain '%010d.jpg' (fallback).
-    """
     jpgs = sorted(
         glob.glob(os.path.join(frames_dir, "frame_*.jpg"))
         + glob.glob(os.path.join(frames_dir, "*.jpg"))
@@ -116,10 +102,6 @@ def _rgb_clip_16x224_from_window(
     mean: List[float],
     std: List[float],
 ) -> Tuple[torch.Tensor, List[int]]:
-    """
-    Uniformly sample exactly T_target frames, center-crop to crop_size,
-    normalize, and pack into a tensor [1, 3, T, H, W].
-    """
     to_tensor = transforms.ToTensor()
     normalize = transforms.Normalize(mean=mean, std=std)
 
@@ -135,63 +117,40 @@ def _rgb_clip_16x224_from_window(
 
 
 # =========================================================
-# Boxes (hand + objects) loading
+# BBox utilities
 # =========================================================
 
-def _ten(x: int) -> str:
-    return f"{x:010d}"
-
-
 def _coords_from_any_box(b: Any) -> Optional[List[float]]:
-    """
-    Extract [x1,y1,x2,y2] from a box that may be:
-      - [x1,y1,x2,y2]
-      - [x1,y1,x2,y2,score]
-      - tuple variants
-    Returns None if invalid.
-    """
     if not isinstance(b, (list, tuple)) or len(b) < 4:
         return None
     try:
         x1, y1, x2, y2 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
     except Exception:
         return None
+    if x2 < x1: x1, x2 = x2, x1
+    if y2 < y1: y1, y2 = y2, y1
     if not (np.isfinite([x1, y1, x2, y2]).all() and x2 > x1 and y2 > y1):
         return None
     return [x1, y1, x2, y2]
 
 
-def _maybe_normalize_224_to_unit(
-    box_xyxy: List[float],
-    crop_size: int
-) -> List[float]:
-    """
-    Boxes in your JSON may be in 224×224 pixel space or already normalized.
-    If max(abs(coord)) <= 1.5 → assume normalized.
-    Else divide by crop_size to get [0,1]. Clamp to [0,1].
-    """
+def _maybe_normalize_224_to_unit(box_xyxy: List[float], crop_size: int) -> Optional[List[float]]:
     x1, y1, x2, y2 = [float(x) for x in box_xyxy]
     if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
         nx1, ny1, nx2, ny2 = x1, y1, x2, y2
     else:
         s = float(crop_size)
         nx1, ny1, nx2, ny2 = x1 / s, y1 / s, x2 / s, y2 / s
-
     nx1 = min(max(nx1, 0.0), 1.0)
     ny1 = min(max(ny1, 0.0), 1.0)
     nx2 = min(max(nx2, 0.0), 1.0)
     ny2 = min(max(ny2, 0.0), 1.0)
-
     if nx2 <= nx1 or ny2 <= ny1:
-        return []
+        return None
     return [nx1, ny1, nx2, ny2]
 
 
 def _derive_segment_key_from_frames_dir(frames_dir: str) -> Optional[str]:
-    """
-    Try to infer 'PXX/PXX_YY' from a frames directory like:
-      .../rgb/P01/P01_11  or  .../object_detection_images/P01/P01_11
-    """
     parts = os.path.normpath(frames_dir).split(os.sep)
     if len(parts) < 2:
         return None
@@ -203,146 +162,207 @@ def _derive_segment_key_from_frames_dir(frames_dir: str) -> Optional[str]:
 
 
 def _load_bboxes_json_any(bboxes_path: str) -> Optional[dict]:
-    """Load JSON; return dict or None."""
     if not bboxes_path or not os.path.isfile(bboxes_path):
         return None
     with open(bboxes_path, "r") as f:
         return json.load(f)
 
 
-def _extract_segment_dict(
-    boxes_blob: dict,
-    seg_key: Optional[str]
-) -> Optional[dict]:
-    """
-    From either a flat dict or a nested {'boxes': {seg_key: {...}}} blob,
-    return the per-frame dict for this segment.
-    """
+def _extract_segment_dict(boxes_blob: dict, seg_key: Optional[str]) -> Optional[dict]:
     if boxes_blob is None:
         return None
-
-    # Nested container?
     if isinstance(boxes_blob, dict) and "boxes" in boxes_blob and isinstance(boxes_blob["boxes"], dict):
         if not seg_key:
             return None
         return boxes_blob["boxes"].get(seg_key, None)
-
-    # Flat → assume already per-frame dict
     if isinstance(boxes_blob, dict):
         return boxes_blob
-
     return None
 
 
-def _select_boxes_from_json_for_sampled_frames(
+def _pick_top_by_area(boxes_xyxy01: List[List[float]], k: int) -> List[List[float]]:
+    if not boxes_xyxy01:
+        return []
+    with_area = [((b[2]-b[0])*(b[3]-b[1]), b) for b in boxes_xyxy01 if len(b) == 4]
+    with_area.sort(key=lambda t: t[0], reverse=True)
+    return [b for _, b in with_area[:k]]
+
+
+def _process_box_list(raw_list: list, crop_size: int, limit: int) -> List[List[float]]:
+    normed = []
+    for b in (raw_list or []):
+        xyxy = _coords_from_any_box(b)
+        if xyxy is None:
+            continue
+        out = _maybe_normalize_224_to_unit(xyxy, crop_size)
+        if out:
+            normed.append(out)
+    picked = _pick_top_by_area(normed, limit)
+    while len(picked) < limit:
+        picked.append([0.0, 0.0, 0.0, 0.0])
+    return picked
+
+
+def build_inavit_boxes(
     per_frame_dict: dict,
-    sampled_frame_numbers: List[Optional[int]],
-    img_size: Tuple[int, int],
-    max_obj: int = 4,
-    include_hand: bool = True,
-    normalize: bool = True,
-    propagate_missing: bool = True,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """
-    Build tensors from a dict in the format:
-
-      { "0000000001": { "hand": [[...], ...], "obj": [[...], ...] }, ... }
-
-    Returns:
-      obj_boxes:  [1, T, max_obj, 4]  (normalized)
-      hand_boxes:[1, T, 1, 4] (or None)
-    """
-    Wc, Hc = img_size  # typically (224, 224)
+    sampled_frame_numbers: List[int],
+    crop_size: int,
+    O: int,
+    U: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     T = len(sampled_frame_numbers)
-
-    obj = torch.zeros((1, T, max_obj, 4), dtype=torch.float32)
-    hand = torch.zeros((1, T, 1, 4), dtype=torch.float32) if include_hand else None
-
-    last_hand_box: Optional[List[float]] = None
-    last_obj_boxes: Optional[List[List[float]]] = None
-
+    obj = torch.zeros((1, T, O, 4), dtype=torch.float32)
+    hand = torch.zeros((1, T, U, 4), dtype=torch.float32)
     for t, fn in enumerate(sampled_frame_numbers):
-        key = _ten(fn) if fn is not None else None
-        entry = per_frame_dict.get(key, {}) if (per_frame_dict is not None and key is not None) else {}
-
-        # ---- HAND ----
-        hand_list = entry.get("hand", []) or []
-        hand_box_norm: Optional[List[float]] = None
-        # hand_list may be list-of-lists or (incorrectly) a single flat list
-        if hand_list and isinstance(hand_list[0], (int, float)):
-            hand_list = [hand_list]  # wrap flat → list-of-lists
-
-        if hand_list:
-            cand = []
-            areas = []
-            for b in hand_list:
-                bx4 = _coords_from_any_box(b)
-                if bx4 is None:
-                    continue
-                bx = _maybe_normalize_224_to_unit(bx4, Hc if normalize else 1)
-                if not bx:
-                    continue
-                cand.append(bx)
-                areas.append((bx[2] - bx[0]) * (bx[3] - bx[1]))
-            if cand:
-                idx = int(np.argmax(areas))
-                hand_box_norm = cand[idx]
-
-        # ---- OBJECTS ----
-        obj_list = entry.get("obj", []) or []
-        obj_boxes_norm: List[List[float]] = []
-        if obj_list:
-            cand = []
-            for b in obj_list:
-                bx4 = _coords_from_any_box(b)
-                if bx4 is None:
-                    continue
-                bx = _maybe_normalize_224_to_unit(bx4, Wc if normalize else 1)
-                if not bx:
-                    continue
-                cand.append(bx)
-            if cand:
-                cand.sort(key=lambda bb: (bb[2]-bb[0]) * (bb[3]-bb[1]), reverse=True)
-                obj_boxes_norm = cand[:max_obj]
-
-        # ---- Propagate if missing ----
-        if propagate_missing:
-            if hand_box_norm is None and last_hand_box is not None:
-                hand_box_norm = last_hand_box
-            if (not obj_boxes_norm) and (last_obj_boxes is not None):
-                obj_boxes_norm = last_obj_boxes
-
-        # ---- Write tensors ----
-        if include_hand and hand_box_norm is not None:
-            hand[0, t, 0] = torch.tensor(hand_box_norm, dtype=torch.float32)
-
-        for k, bx in enumerate(obj_boxes_norm[:max_obj]):
-            obj[0, t, k] = torch.tensor(bx, dtype=torch.float32)
-
-        # Update last seen (only if present this step)
-        if hand_box_norm is not None:
-            last_hand_box = hand_box_norm
-        if obj_boxes_norm:
-            last_obj_boxes = obj_boxes_norm
-
-    return obj, hand
-
-
-def _dummy_bboxes(T: int, max_obj: int = 4, include_hand: bool = True) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    obj = torch.zeros((1, T, max_obj, 4), dtype=torch.float32)
-    hand = torch.zeros((1, T, 1, 4), dtype=torch.float32) if include_hand else None
+        key = _ten(fn)
+        entry = per_frame_dict.get(key, {}) if per_frame_dict else {}
+        raw_obj  = entry.get("obj", []) or []
+        raw_hand = entry.get("hand", []) or []
+        objs  = _process_box_list(raw_obj,  crop_size, O)
+        hands = _process_box_list(raw_hand, crop_size, U)
+        if O > 0:
+            obj[0, t, :O] = torch.tensor(objs[:O], dtype=torch.float32)
+        if U > 0:
+            hand[0, t, :U] = torch.tensor(hands[:U], dtype=torch.float32)
     return obj, hand
 
 
 # =========================================================
-# Top‑k helpers
+# Output normalization (robust)
+# =========================================================
+
+def _cfg_expected_sizes(cfg) -> Dict[str, Optional[int]]:
+    """
+    Pull expected head sizes from YAML if present:
+      MODEL.HEADS.VERB / NOUN / ACTION (Option B), else None.
+    """
+    sizes = {"verb": None, "noun": None, "action": None}
+    if hasattr(cfg, "MODEL") and hasattr(cfg.MODEL, "HEADS"):
+        h = cfg.MODEL.HEADS
+        for k in ("VERB", "NOUN", "ACTION"):
+            if hasattr(h, k):
+                try:
+                    sizes[k.lower()] = int(getattr(h, k))
+                except Exception:
+                    pass
+    return sizes
+
+
+def _guess_verb_noun_by_size(tensors: List[torch.Tensor], expect: Dict[str, Optional[int]]) -> Dict[str, torch.Tensor]:
+    """
+    Given 2 tensors (order unknown), figure out which is verb vs noun:
+      1) use expected sizes if available
+      2) else heuristic: smaller dim = verb (97), larger = noun (300)
+    """
+    res: Dict[str, torch.Tensor] = {}
+    if len(tensors) == 1:
+        res["action"] = tensors[0]
+        return res
+    if len(tensors) >= 2:
+        a, b = tensors[0], tensors[1]
+        aC = a.size(-1)
+        bC = b.size(-1)
+        vexp, nexp = expect.get("verb"), expect.get("noun")
+        # try hard match first
+        if vexp and (aC == vexp or bC == vexp):
+            res["verb"] = a if aC == vexp else b
+            res["noun"] = b if aC == vexp else a
+            return res
+        if nexp and (aC == nexp or bC == nexp):
+            res["noun"] = a if aC == nexp else b
+            res["verb"] = b if aC == nexp else a
+            return res
+        # heuristic
+        if aC <= bC:
+            res["verb"], res["noun"] = a, b
+        else:
+            res["verb"], res["noun"] = b, a
+        return res
+    return res
+
+
+def _normalize_heads(outputs, cfg=None) -> Dict[str, torch.Tensor]:
+    """
+    Accept model outputs in many shapes and normalize to a dict of heads.
+    Handles:
+      - dict with keys among {'verb','noun','action'} or odd names: {'head0','head1','head','head_action',...}
+      - tuple/list length 2 or 3 (e.g., (verb,noun[,action]))
+      - single tensor (treated as action)
+    """
+    expect = _cfg_expected_sizes(cfg)
+
+    # If it's a sequence, flatten any nested singletons
+    if isinstance(outputs, (list, tuple)):
+        flat = []
+        for o in outputs:
+            if isinstance(o, (list, tuple)) and len(o) == 1 and torch.is_tensor(o[0]):
+                flat.append(o[0])
+            else:
+                flat.append(o)
+        outputs = tuple(flat)
+
+    # Case A: direct tensors inside a list/tuple
+    if isinstance(outputs, (list, tuple)) and all(torch.is_tensor(x) for x in outputs):
+        # try to resolve (verb, noun [, action])
+        res = _guess_verb_noun_by_size(list(outputs), expect)
+        if len(outputs) == 3:
+            # best effort: third is action if size matches or just put it
+            third = outputs[2]
+            if expect.get("action") and third.size(-1) == expect["action"]:
+                res["action"] = third
+            elif "action" not in res:
+                res["action"] = third
+        return res if res else {"action": outputs[0]}
+
+    # Case B: dict-like outputs
+    if isinstance(outputs, dict):
+        out: Dict[str, torch.Tensor] = {}
+        # direct keys
+        for k in ("action", "verb", "noun"):
+            v = outputs.get(k, None)
+            if torch.is_tensor(v):
+                out[k] = v
+        # odd keys (common in different repos)
+        odd_keys = ["head", "head_action", "head0", "head1", "cls_head", "action_head", "verb_head", "noun_head"]
+        odd_tensors = [(k, outputs[k]) for k in odd_keys if k in outputs and torch.is_tensor(outputs[k])]
+        if odd_tensors:
+            # if we already have verb/noun/action don't overwrite; fill missing
+            tensors_only = [t for _, t in odd_tensors]
+            guess = _guess_verb_noun_by_size(tensors_only, expect)
+            for k in ("verb", "noun", "action"):
+                if k not in out and k in guess:
+                    out[k] = guess[k]
+        # final fallback: first tensor found in dict
+        if not out:
+            for k, v in outputs.items():
+                if torch.is_tensor(v):
+                    out["action"] = v
+                    break
+        return out
+
+    # Case C: single tensor
+    if torch.is_tensor(outputs):
+        return {"action": outputs}
+
+    # Case D: tuple with sub-dicts (rare)
+    if isinstance(outputs, (list, tuple)) and any(isinstance(x, dict) for x in outputs):
+        # merge recursively
+        merged: Dict[str, torch.Tensor] = {}
+        for x in outputs:
+            if isinstance(x, dict):
+                sub = _normalize_heads(x, cfg=cfg)
+                merged.update({k: v for k, v in sub.items() if torch.is_tensor(v)})
+        if merged:
+            return merged
+
+    raise RuntimeError(f"Unsupported model output type: {type(outputs)}")
+
+
+# =========================================================
+# Prediction helpers
 # =========================================================
 
 def _topk_from_logits(logits: torch.Tensor, k: int = 5) -> Tuple[List[int], List[float]]:
-    """
-    Softmax → top‑k indices and scores (lists).
-    logits: [1, C] or [C]
-    """
     if logits.dim() == 1:
         logits = logits.unsqueeze(0)
     probs = F.softmax(logits, dim=1)
@@ -350,46 +370,16 @@ def _topk_from_logits(logits: torch.Tensor, k: int = 5) -> Tuple[List[int], List
     return idx[0].cpu().tolist(), vals[0].cpu().tolist()
 
 
-# =========================================================
-# Output normalization (single‑head or multi‑head)
-# =========================================================
-
-def _normalize_heads(outputs) -> Dict[str, torch.Tensor]:
-    """
-    Accept model outputs in several shapes and normalize to a dict of heads.
-
-    Supports:
-      - dict with any subset of {'verb','noun','action'}
-      - tensor or 1D/2D logits => interpreted as action head
-      - tuple/list with one element => unpack
-    """
-    if isinstance(outputs, (list, tuple)) and len(outputs) > 0:
-        outputs = outputs[0]
-
-    if isinstance(outputs, dict):
-        out = {}
-        if 'action' in outputs:
-            out['action'] = outputs['action']
-        if 'verb' in outputs:
-            out['verb'] = outputs['verb']
-        if 'noun' in outputs:
-            out['noun'] = outputs['noun']
-        if not out:
-            for k in outputs:
-                v = outputs[k]
-                if torch.is_tensor(v):
-                    out['action'] = v
-                    break
-        return out
-
-    if torch.is_tensor(outputs):
-        return {'action': outputs}
-
-    raise RuntimeError(f"Unsupported model output type: {type(outputs)}")
+def _best_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 # =========================================================
-# Public API: predict_segment (RGB‑only; Ta=1s, 64→16)
+# Public API: predict_segment
 # =========================================================
 
 @torch.no_grad()
@@ -400,32 +390,29 @@ def predict_segment(
     cfg,
     start_frame: Optional[int] = None,
     stop_frame: Optional[int] = None,
-    bboxes_path: Optional[str] = None,   # <— NEW: direct path to bboxes.json
+    bboxes_path: Optional[str] = None,
 ) -> Dict[str, List]:
     """
     InAViT‑style inference for a single EK100 anticipation instance.
 
-    Protocol:
-      - t* = start_frame - 1  (anticipation gap Ta=1s)
-      - observe last 64 frames up to t*
-      - uniformly sample 16 frames → 224×224 center crop
-      - build 1 hand + up to 4 object boxes per frame (from bboxes.json if present; else dummy zeros)
-      - forward model and return Top‑5.
+    - observe last 64 frames up to t* = start_frame - 1
+    - sample 16 frames → 224×224 center crop
+    - build (obj + hand) tensors from bboxes.json
+    - robustly parse model outputs (tuple/dict/odd head names) to get verb/noun/action
     """
     device = getattr(model, "device", torch.device("cpu"))
 
-    # ---- 0) derive t* ----
     if start_frame is None:
         raise ValueError("predict_segment requires start_frame for anticipation.")
     t_star = max(1, int(start_frame) - 1)
 
-    # ---- 1) collect window frames [t*-63, t*] ----
+    # 1) frames window
     window_len = 64
     paths_in_window, nums_in_window = _collect_rgb_frames_in_window(frames_dir, t_star, window_len=window_len)
     if len(paths_in_window) == 0:
         raise RuntimeError(f"No frames found in observed window for: {frames_dir}")
 
-    # ---- 2) sample 16 @ 224² ----
+    # 2) sample 16 @ 224²
     T_target = int(getattr(cfg.DATA, "NUM_FRAMES", 16))
     crop = int(getattr(cfg.DATA, "TEST_CROP_SIZE", 224))
     mean = getattr(cfg.DATA, "MEAN", [0.5, 0.5, 0.5])
@@ -433,12 +420,11 @@ def predict_segment(
 
     clip, sel = _rgb_clip_16x224_from_window(paths_in_window, crop, T_target, mean, std)
     clip = clip.to(device)  # [1,3,T,H,W]
-
-    # Selected *frame numbers* for boxes lookup
     sampled_nums = [nums_in_window[i] if i < len(nums_in_window) else None for i in sel]
+    if any(n is None for n in sampled_nums):
+        raise RuntimeError("Sampled frame numbers contain None; check frame naming.")
 
-    # ---- 3) Load boxes (hand + up to 4 objects)
-    # Preferred: explicit bboxes_path; Fallback: obj_dir/bboxes.json
+    # 3) load boxes JSON and build tensors (obj + hand)
     candidate_path = bboxes_path or (os.path.join(obj_dir, "bboxes.json") if obj_dir else None)
     per_frame_dict = None
     if candidate_path:
@@ -447,55 +433,63 @@ def predict_segment(
             seg_key = _derive_segment_key_from_frames_dir(frames_dir)
             per_frame_dict = _extract_segment_dict(blob, seg_key)
 
-    if per_frame_dict is not None and all(n is not None for n in sampled_nums):
-        obj_boxes, hand_boxes = _select_boxes_from_json_for_sampled_frames(
-            per_frame_dict,
-            sampled_frame_numbers=sampled_nums,
-            img_size=(crop, crop),
-            max_obj=4,
-            include_hand=True,
-            normalize=True,
-            propagate_missing=True,
-        )
-    else:
-        obj_boxes, hand_boxes = _dummy_bboxes(T=T_target, max_obj=4, include_hand=True)
+    if per_frame_dict is None:
+        raise FileNotFoundError("No usable bboxes found. Provide --bboxes or per-segment obj_dir/bboxes.json")
 
-    # ---- Debug counts ----
+    O = int(getattr(cfg.HOIVIT, "O", 5)) if hasattr(cfg, "HOIVIT") else 5
+    U = int(getattr(cfg.HOIVIT, "U", 1)) if hasattr(cfg, "HOIVIT") else 1
+    obj_boxes, hand_boxes = build_inavit_boxes(
+        per_frame_dict=per_frame_dict,
+        sampled_frame_numbers=sampled_nums,
+        crop_size=crop,
+        O=O, U=U,
+    )
+
+    # debug
     def _nz(t: torch.Tensor) -> int:
         with torch.no_grad():
-            m = (t.abs().sum(dim=-1) > 0)  # [1,T,max_obj] or [1,T,1]
+            m = (t.abs().sum(dim=-1) > 0)
             return int(m.any(dim=-1).sum().item())
-    obj_nz = _nz(obj_boxes)
-    hand_nz = _nz(hand_boxes) if hand_boxes is not None else 0
-    print(f"[DEBUG] boxes used → obj_frames_with_boxes={obj_nz}/{obj_boxes.shape[1]} | hand_frames_with_boxes={hand_nz}/{obj_boxes.shape[1]}")
-    src_note = candidate_path if candidate_path else "dummy"
-    print(f"[BOXES] source={src_note}")
+    obj_nz = _nz(obj_boxes) if O > 0 else 0
+    hand_nz = _nz(hand_boxes) if U > 0 else 0
+    print(f"[DEBUG] InAViT boxes → obj_frames={obj_nz}/{obj_boxes.shape[1]} | hand_frames={hand_nz}/{hand_boxes.shape[1] if U>0 else 0}")
+    print(f"[BOXES] source={candidate_path}")
 
-    metadata = {
-        "orvit_bboxes": {"obj": obj_boxes.to(device), "hand": hand_boxes.to(device) if hand_boxes is not None else None},
-        "hoivit_bboxes": {"obj": obj_boxes.to(device), "hand": hand_boxes.to(device) if hand_boxes is not None else None},
-        "bboxes": {"obj": obj_boxes.to(device), "hand": hand_boxes.to(device) if hand_boxes is not None else None},
-        "boxes": {"obj": obj_boxes.to(device), "hand": hand_boxes.to(device) if hand_boxes is not None else None},
+    # Move to device
+    obj_boxes = obj_boxes.to(device)
+    hand_boxes = hand_boxes.to(device)
+
+    # 4) Build metadata (dict variant first, with aliases)
+    meta = {
+        "orvit_bboxes": {"obj": obj_boxes, "hand": hand_boxes},
+        "hoivit_bboxes": {"obj": obj_boxes, "hand": hand_boxes},
+        "boxes": {"obj": obj_boxes, "hand": hand_boxes},
+        "bboxes": {"obj": obj_boxes, "hand": hand_boxes},
     }
 
-    # ---- 4) forward ----
-    raw_outputs = model([clip], metadata)
-    heads = _normalize_heads(raw_outputs)
+    # 5) forward (try dict first; fall back to plain obj tensor if needed)
+    try:
+        raw_outputs = model([clip], meta)
+    except Exception as e_dict:
+        try:
+            raw_outputs = model([clip], {"orvit_bboxes": obj_boxes})
+        except Exception as e_alt:
+            raise RuntimeError(f"Model forward failed: dict-meta → {e_dict} | obj-only → {e_alt}") from e_alt
 
-    # ---- 5) top‑5 per available head ----
-    result = {
-        "verb_top5_idx": [],
-        "verb_top5_scores": [],
-        "noun_top5_idx": [],
-        "noun_top5_scores": [],
-        "action_top5_idx": [],
-        "action_top5_scores": [],
+    # 6) normalize heads (robust)
+    heads = _normalize_heads(raw_outputs, cfg=cfg)
+    heads_present = {k: (k in heads and heads[k] is not None) for k in ("action", "verb", "noun")}
+
+    # 7) top‑5
+    result: Dict[str, Any] = {
+        "verb_top5_idx": [], "verb_top5_scores": [],
+        "noun_top5_idx": [], "noun_top5_scores": [],
+        "action_top5_idx": [], "action_top5_scores": [],
+        "meta": {
+            "heads_present": heads_present,
+            "bboxes_path": candidate_path,
+        }
     }
-
-    if "action" in heads and heads["action"] is not None:
-        a_idx, a_scr = _topk_from_logits(heads["action"], k=5)
-        result["action_top5_idx"] = a_idx
-        result["action_top5_scores"] = a_scr
 
     if "verb" in heads and heads["verb"] is not None:
         v_idx, v_scr = _topk_from_logits(heads["verb"], k=5)
@@ -507,38 +501,41 @@ def predict_segment(
         result["noun_top5_idx"] = n_idx
         result["noun_top5_scores"] = n_scr
 
+    if "action" in heads and heads["action"] is not None:
+        a_idx, a_scr = _topk_from_logits(heads["action"], k=5)
+        result["action_top5_idx"] = a_idx
+        result["action_top5_scores"] = a_scr
+
+    # helpful runtime print (won't spam if you aggregate)
+    if not any(result["action_top5_idx"]):
+        # no action head detected; reporting verb/noun only is fine
+        pass
+
     return result
 
 
 # =========================================================
-# Model build + load (device‑agnostic; CPU/MPS/CUDA)
+# Build & load model (keep checkpoint heads)
 # =========================================================
-
-def _best_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
 
 def build_and_load_model(cfg, pretrained_path: str = "checkpoints/checkpoint_epoch_00081.pyth"):
     """
-    Build the InAViT (MotionFormer backbone + HOI modules) and load weights.
-    Leaves classifier heads intact (e.g., 3806 for EK100).
+    Build MotionFormer/InAViT and load weights.
+    We KEEP the checkpoint's classifier heads so verb=97, noun=300 stay intact.
     """
     model = build_model(cfg)
 
+    # default_cfg used by load_pretrained (timm-style fields)
     model.default_cfg = {
         "first_conv": "patch_embed.proj",
-        "classifier": "head",
+        "classifier": ["head0", "head1", "head", "head_action"],
         "url": ""
     }
 
     load_pretrained(
         model=model,
         cfg=model.default_cfg,
-        num_classes=cfg.MODEL.NUM_CLASSES,
+        num_classes=cfg.MODEL.NUM_CLASSES,  # ignored when keep_classifier=True (default)
         in_chans=3,
         filter_fn=_conv_filter,
         img_size=cfg.DATA.TEST_CROP_SIZE,
@@ -546,6 +543,18 @@ def build_and_load_model(cfg, pretrained_path: str = "checkpoints/checkpoint_epo
         pretrained_model=pretrained_path,
         strict=False,
     )
+
+    # Optional: print head structure so you can verify sizes
+    try:
+        print("[DEBUG] Model heads:")
+        if hasattr(model, "head_drop"):
+            print("head_drop", model.head_drop)
+        for name in ("head", "head0", "head1", "head_action"):
+            mod = getattr(model, name, None)
+            if mod is not None:
+                print(f"{name}", mod)
+    except Exception:
+        pass
 
     model.eval()
     device = _best_device()
