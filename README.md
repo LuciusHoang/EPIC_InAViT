@@ -6,9 +6,9 @@ This repository contains code only and does not include the EPIC-KITCHENS-100 da
 More detail at: https://data.bris.ac.uk/data/dataset/3h91syskeag572hl6tvuovwv4d.
 
 Inference Result:
-  "Top5_Recall_Verb": 0.777027027027027
-  "Top5_Recall_Noun": 0.7027027027027027
-  "Top5_Recall_Action_Derived": 0.36486486486486486
-  "num_eval_action": 148
-  "overlap": 148
+- "Top5_Recall_Verb": 0.777027027027027
+- "Top5_Recall_Noun": 0.7027027027027027
+- "Top5_Recall_Action_Derived": 0.36486486486486486
+- "num_eval_action": 148
+- "overlap": 148
 
