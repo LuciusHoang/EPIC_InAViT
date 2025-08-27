@@ -49,8 +49,7 @@ python convert_to_inavit_boxes.py \
 git clone https://github.com/LAHAproject/InAViT.git  
 
 10. Amend setup in InAViT package:  
-- In /InAViT/slowfast/models/video_model_builder.py, delete "<<<<<<< HEAD", "=======", ">>>>>>> e0ef9a0442f6ba31ffe45ac06f6b3bf13782c7de", 
-and comment out below:  
+- In /InAViT/slowfast/models/video_model_builder.py, delete "<<<<<<< HEAD", "=======", ">>>>>>> e0ef9a0442f6ba31ffe45ac06f6b3bf13782c7de", and comment out below:  
 _"from .HOIVIT import ORViT as ORViT  
 from .HOIVIT import HoIViT as HoIViT  
 from .HOIVIT import STDViT as STDViT  
